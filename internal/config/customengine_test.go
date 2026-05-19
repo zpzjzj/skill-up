@@ -110,6 +110,37 @@ func TestResolveCustomEngineEnv_BuiltinEngineSkipsResolution(t *testing.T) {
 	}
 }
 
+func TestResolveCustomEngineConfig_ValidatesOverriddenEngine(t *testing.T) {
+	// Simulates a --engine override turning a built-in engine (whose custom
+	// block was skipped at load) into a custom one with an unrunnable transport.
+	cfg := &EvalConfig{
+		Engine: EngineConfig{
+			Name:   "my-agent",
+			Custom: &CustomEngineConfig{Transport: "http", HTTP: &CustomHTTPConfig{URL: "https://x"}},
+		},
+	}
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "http is not yet implemented") {
+		t.Fatalf("error = %v, want the http transport to be rejected", err)
+	}
+}
+
+func TestResolveCustomEngineConfig_ResolvesEnvForOverriddenEngine(t *testing.T) {
+	t.Setenv("OVERRIDE_AGENT_BIN", "/opt/override-agent")
+	cfg := &EvalConfig{
+		Engine: EngineConfig{
+			Name:   "my-agent",
+			Custom: &CustomEngineConfig{Transport: "local", Local: &CustomLocalConfig{Command: "${OVERRIDE_AGENT_BIN}"}},
+		},
+	}
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("ResolveCustomEngineConfig: %v", err)
+	}
+	if cfg.Engine.Custom.Local.Command != "/opt/override-agent" {
+		t.Fatalf("command = %q, want the env reference resolved", cfg.Engine.Custom.Local.Command)
+	}
+}
+
 func TestIsBuiltinTemplateVar(t *testing.T) {
 	for _, name := range []string{"workspace", "prompt", "api_key", "input_file", "kwargs", "kwargs.profile"} {
 		if !IsBuiltinTemplateVar(name) {

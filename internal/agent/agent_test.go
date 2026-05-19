@@ -13,6 +13,9 @@ import (
 	"github.com/alibaba/skill-up/internal/credential"
 )
 
+// modelAuto is the QoderCLI "auto" model tier, shared across agent tests.
+const modelAuto = "auto"
+
 func TestListSkillFiles_ExcludesEvals(t *testing.T) {
 	t.Parallel()
 

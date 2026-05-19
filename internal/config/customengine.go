@@ -42,6 +42,20 @@ func IsBuiltinTemplateVar(name string) bool {
 	return ok
 }
 
+// ResolveCustomEngineConfig re-runs environment-variable resolution and engine
+// validation for the current engine.Name. It exists for the CLI --engine
+// override path: when eval.yaml named a built-in engine, engine.custom is
+// skipped at load time, so an override to a custom engine must process it now.
+func ResolveCustomEngineConfig(cfg *EvalConfig) error {
+	if err := resolveCustomEngineEnv(cfg); err != nil {
+		return err
+	}
+	if errs := validateEngine(cfg.Engine); len(errs) > 0 {
+		return fmt.Errorf("validation errors:\n  - %s", strings.Join(errs, "\n  - "))
+	}
+	return nil
+}
+
 // resolveCustomEngineEnv resolves ${VAR} environment-variable references inside
 // the custom engine config tree. It is a no-op when engine.custom is absent or
 // when engine.name is a built-in agent (which ignores engine.custom entirely,

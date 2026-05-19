@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alibaba/skill-up/internal/config"
+	"github.com/alibaba/skill-up/internal/credential"
 	"github.com/alibaba/skill-up/internal/runtime"
 	"github.com/alibaba/skill-up/pkg/transcript"
 )
@@ -180,6 +181,29 @@ func TestCustomAgent_RunLocal_TextFormat(t *testing.T) {
 	}
 	if res.FinalMessage != "plain output text" {
 		t.Fatalf("final_message = %q, want plain output text", res.FinalMessage)
+	}
+}
+
+func TestCustomAgent_RunLocal_TextIgnoresOutputFile(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// A text engine prints the answer on stdout but also writes a bookkeeping
+	// file at the default ${output_file} path; stdout must be graded.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport:      "local",
+		ResponseFormat: "text",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `mkdir -p outputs && echo bookkeeping > outputs/session-result.json && echo stdout-answer`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "stdout-answer" {
+		t.Fatalf("final_message = %q, want stdout-answer (output file must not be graded)", res.FinalMessage)
 	}
 }
 
@@ -599,5 +623,28 @@ func TestDetectAgent_NonBuiltinWithoutCustom(t *testing.T) {
 	_, err := DetectAgent("my-agent", Config{Name: "my-agent"})
 	if err == nil || !strings.Contains(err.Error(), "missing engine.custom") {
 		t.Fatalf("error = %v, want missing engine.custom", err)
+	}
+}
+
+func TestDetectAgentWithInitParams_KeepsAutoModelForCustom(t *testing.T) {
+	t.Parallel()
+	custom := &config.CustomEngineConfig{
+		Transport: "local",
+		Local:     &config.CustomLocalConfig{Command: "/opt/agent"},
+	}
+	ag, err := DetectAgentWithInitParams("my-agent", credential.AgentInitParams{
+		Model:  modelAuto,
+		Custom: custom,
+	})
+	if err != nil {
+		t.Fatalf("DetectAgentWithInitParams: %v", err)
+	}
+	ca, ok := ag.(*CustomAgent)
+	if !ok {
+		t.Fatalf("agent type = %T, want *CustomAgent", ag)
+	}
+	// "auto" must not be stripped for a custom engine.
+	if ca.Cfg.ModelName != modelAuto {
+		t.Fatalf("ModelName = %q, want auto preserved for custom engine", ca.Cfg.ModelName)
 	}
 }

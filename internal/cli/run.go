@@ -173,9 +173,21 @@ func loadAndPrepareConfig(ctx context.Context, cmd *cobra.Command, args []string
 	}
 
 	engineName, _ := cmd.Flags().GetString("engine")
+	prevEngine := ""
+	if evalCfg != nil {
+		prevEngine = evalCfg.Engine.Name
+	}
 	evalCfg = resolveEvalConfig(evalCfg, engineName, cmd)
 	if err := applyRunConfigOverrides(evalCfg, cmd); err != nil { //nolint:contextcheck // ctx accessed via cmd.Context() inside helpers
 		return nil, nil, nil, err
+	}
+	// A --engine override can change a built-in engine into a custom one whose
+	// engine.custom block was skipped by load-time env resolution and
+	// validation; reprocess it now that the engine name is final.
+	if evalCfg.Engine.Name != prevEngine {
+		if err := config.ResolveCustomEngineConfig(evalCfg); err != nil {
+			return nil, nil, nil, fmt.Errorf("engine override: %w", err)
+		}
 	}
 
 	modelRef := formatModelRef(evalCfg.Engine.Model.Provider, evalCfg.Engine.Model.Name)

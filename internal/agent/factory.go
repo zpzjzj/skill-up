@@ -41,9 +41,11 @@ func DetectAgent(engineName string, cfg Config) (Agent, error) {
 // DetectAgentWithInitParams maps resolved init params into an engine-specific agent config.
 func DetectAgentWithInitParams(engineName string, params credential.AgentInitParams) (Agent, error) {
 	model := params.Model
-	// "auto" is a QoderCLI-specific model tier; strip it for other engines
-	// so downstream agents don't need to hard-code awareness of it.
-	if model == "auto" && !isQoderCLIEngine(engineName) {
+	// "auto" is a QoderCLI-specific model tier; strip it for other built-in
+	// engines so they don't need to hard-code awareness of it. A custom engine
+	// keeps the user's configured value — it is exposed verbatim via ${model}
+	// and SessionInput.model.
+	if model == "auto" && !isQoderCLIEngine(engineName) && params.Custom == nil {
 		model = ""
 	}
 

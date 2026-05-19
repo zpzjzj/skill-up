@@ -256,11 +256,14 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 }
 
 // buildResult parses raw engine output into a SessionResult according to the
-// configured response_format. The text format never errors; session_result
-// returns a parse error when the payload is missing or malformed.
+// configured response_format. The text format never errors and always grades
+// stdout (never the output file); session_result returns a parse error when
+// the payload is missing or malformed.
 func (a *CustomAgent) buildResult(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, raw string, result ExecResult, durationMs int64, messages []transcript.Message) (*SessionResult, error) {
 	if customResponseFormat(custom) == customResponseText {
-		finalMsg := strings.TrimSpace(raw)
+		// Per the contract, text responses come from stdout; an output file
+		// produced for bookkeeping must not be graded as the final answer.
+		finalMsg := strings.TrimSpace(result.Stdout)
 		return &SessionResult{
 			Engine:       a.Name(),
 			ExitCode:     result.ExitCode,
