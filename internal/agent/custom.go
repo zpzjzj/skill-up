@@ -14,6 +14,7 @@ import (
 
 	"github.com/alibaba/skill-up/internal/config"
 	"github.com/alibaba/skill-up/internal/logging"
+	"github.com/alibaba/skill-up/internal/runtime"
 	"github.com/alibaba/skill-up/pkg/transcript"
 )
 
@@ -43,6 +44,17 @@ func NewCustomAgent(cfg Config) *CustomAgent {
 // Install is a no-op: a custom engine's command is provided and managed by the
 // user, not installed by skill-eval.
 func (a *CustomAgent) Install(_ context.Context, _ Runtime) error { return nil }
+
+// InstallMCP is a no-op for custom engines: a custom engine discovers MCP
+// servers from the runtime environment itself. Declared servers are logged so
+// an eval is not silently missing expected MCP wiring, but no installation is
+// attempted (unlike the inherited CLIAgent.InstallMCP, which would error).
+func (a *CustomAgent) InstallMCP(ctx context.Context, _ Runtime, mcpCfg runtime.MCPConfig) error {
+	if len(mcpCfg.Servers) > 0 {
+		logging.InfoContextf(ctx, "CustomAgent %q: %d MCP server(s) declared; a custom engine manages MCP itself, skipping installation", a.Name(), len(mcpCfg.Servers))
+	}
+	return nil
+}
 
 // Check is a no-op for custom engines.
 func (a *CustomAgent) Check(_ context.Context, _ Runtime) error { return nil }
@@ -130,8 +142,16 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 
 	cwd := rt.Workspace()
 	if local.Cwd != "" {
-		if cwd, err = renderTemplate(local.Cwd, vars); err != nil {
-			return "", ExecOptions{}, fmt.Errorf("render local.cwd: %w", err)
+		rendered, rErr := renderTemplate(local.Cwd, vars)
+		if rErr != nil {
+			return "", ExecOptions{}, fmt.Errorf("render local.cwd: %w", rErr)
+		}
+		// Resolve a relative cwd against the runtime workspace so local
+		// transport behaves consistently across runtimes (NoneRuntime would
+		// otherwise pass it through relative to the skill-up process).
+		cwd = rendered
+		if !filepath.IsAbs(cwd) {
+			cwd = filepath.Join(rt.Workspace(), cwd)
 		}
 	}
 
@@ -186,11 +206,16 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 	return res, nil
 }
 
-// readRawResult reads the result payload from the output file (preferred) or stdout.
+// readRawResult reads the result payload from the output file when present,
+// otherwise from stdout. The output file is consulted even when local.output_file
+// is omitted, since a custom engine may write to the default ${output_file}
+// path; a missing default file simply falls back to stdout.
 func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *config.CustomEngineConfig, result ExecResult, outputFile string) string {
-	if custom.Local.OutputFile == "" {
+	if outputFile == "" {
 		return result.Stdout
 	}
+	explicit := custom.Local.OutputFile != ""
+
 	// A per-call temp file avoids collisions when parallel cases share the
 	// same output_file basename (e.g. the documented default).
 	tmpFile, err := os.CreateTemp("", "skill-up-custom-result-*")
@@ -201,13 +226,21 @@ func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *con
 	tmp := tmpFile.Name()
 	_ = tmpFile.Close()
 	defer func() { _ = os.Remove(tmp) }()
+
 	if err := rt.DownloadFile(ctx, outputFile, tmp); err != nil {
-		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
+		if explicit {
+			logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
+		} else {
+			logging.DebugContextf(ctx, "CustomAgent: default output_file %s not produced, using stdout", outputFile)
+		}
 		return result.Stdout
 	}
 	data, err := os.ReadFile(tmp)
 	if err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
+		return result.Stdout
+	}
+	if strings.TrimSpace(string(data)) == "" {
 		return result.Stdout
 	}
 	return string(data)

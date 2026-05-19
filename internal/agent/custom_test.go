@@ -75,6 +75,69 @@ func TestCustomAgent_RunLocal_OutputFile(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_DefaultOutputFile(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// output_file is not configured, but the command writes to the default
+	// ${output_file} path; readRawResult must prefer it over stdout.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `mkdir -p "$(dirname '${output_file}')" && echo '{"exit_code":0,"final_message":"from-default-file"}' > '${output_file}' && echo noise-on-stdout`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "from-default-file" {
+		t.Fatalf("final_message = %q, want from-default-file", res.FinalMessage)
+	}
+}
+
+func TestCustomAgent_RunLocal_RelativeCwd(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// "inputs" is created under the workspace when the session input is
+	// written; a relative cwd must resolve against the workspace.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Cwd:     "inputs",
+			Args:    []string{"-c", `printf '{"exit_code":0,"final_message":"%s"}' "$(pwd)"`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.HasSuffix(res.FinalMessage, "/inputs") {
+		t.Fatalf("cwd = %q, want it resolved under the workspace inputs/ dir", res.FinalMessage)
+	}
+}
+
+func TestCustomAgent_InstallMCP_NoopWithServers(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local:     &config.CustomLocalConfig{Command: "/opt/agent"},
+	})
+
+	// CLIAgent.InstallMCP would error here (empty InstallMCPCmd + servers);
+	// CustomAgent overrides it to a no-op.
+	err := ag.InstallMCP(context.Background(), rt, runtime.MCPConfig{
+		Servers: []runtime.MCPServerConfig{{Name: "demo", Mode: "mocked"}},
+	})
+	if err != nil {
+		t.Fatalf("InstallMCP: %v", err)
+	}
+}
+
 func TestCustomAgent_RunLocal_TextFormat(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
@@ -189,7 +252,8 @@ func TestCustomAgent_RunLocal_TimeoutEnforced(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if elapsed > 4*time.Second {
+	// 1s deadline + NoneRuntime's WaitDelay grace; well under the 5s sleep.
+	if elapsed > 4500*time.Millisecond {
 		t.Fatalf("run took %s, want the 1s timeout to be enforced", elapsed)
 	}
 }

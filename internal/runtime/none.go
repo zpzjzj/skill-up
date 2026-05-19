@@ -19,6 +19,9 @@ import (
 const (
 	noneDirMode  = 0o755
 	noneFileMode = 0o600
+	// noneExecWaitDelay is the grace period Wait allows for I/O to drain after
+	// a command's context is cancelled before it forcibly closes the pipes.
+	noneExecWaitDelay = 2 * time.Second
 )
 
 // pathInWorkspaceOrAbs returns p if it is an absolute host path, otherwise filepath.Join(r.workspace, p).
@@ -169,6 +172,11 @@ func (r *NoneRuntime) Exec(ctx context.Context, command string, opts ExecOptions
 	startTime := time.Now()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// WaitDelay bounds how long Wait blocks after the context is cancelled:
+	// without it, a killed command whose grandchildren still hold the stdout
+	// pipe (e.g. a backgrounded `sleep`) makes Exec hang until those children
+	// exit, so a context deadline would not actually be enforced.
+	cmd.WaitDelay = noneExecWaitDelay
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	} else {

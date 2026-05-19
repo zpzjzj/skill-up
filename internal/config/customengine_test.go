@@ -156,7 +156,7 @@ func TestValidateEvalConfig_CustomTransport(t *testing.T) {
 		{
 			name:      "invalid transport",
 			custom:    &CustomEngineConfig{Transport: "grpc"},
-			wantError: "engine.custom.transport must be one of",
+			wantError: `engine.custom.transport must be "local"`,
 		},
 		{
 			name:      "local missing command",
@@ -169,9 +169,9 @@ func TestValidateEvalConfig_CustomTransport(t *testing.T) {
 			wantError: "engine.custom.response_format must be one of",
 		},
 		{
-			name:      "http missing url",
-			custom:    &CustomEngineConfig{Transport: "http"},
-			wantError: "engine.custom.http.url is required",
+			name:      "http not yet implemented",
+			custom:    &CustomEngineConfig{Transport: "http", HTTP: &CustomHTTPConfig{URL: "https://x"}},
+			wantError: "http is not yet implemented",
 		},
 	}
 	for _, tc := range tests {

@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -206,12 +205,20 @@ func validateEngine(engine EngineConfig) []string {
 func validateCustomEngine(custom *CustomEngineConfig) []string {
 	var errs []string
 
+	// Only the local transport is implemented. The http transport is designed
+	// (see docs/design/custom-engine.md) but rejected here so `skill-up
+	// validate` does not approve a config that every run would fail.
 	switch custom.Transport {
 	case "":
-		errs = append(errs, "engine.custom.transport is required (local, http)")
-	case customTransportLocal, customTransportHTTP:
+		errs = append(errs, "engine.custom.transport is required (local)")
+	case customTransportLocal:
+		if custom.Local == nil || custom.Local.Command == "" {
+			errs = append(errs, "engine.custom.local.command is required when transport is local")
+		}
+	case customTransportHTTP:
+		errs = append(errs, "engine.custom.transport: http is not yet implemented; use transport: local")
 	default:
-		errs = append(errs, fmt.Sprintf("engine.custom.transport must be one of: local, http (got %q)", custom.Transport))
+		errs = append(errs, fmt.Sprintf("engine.custom.transport must be \"local\" (got %q)", custom.Transport))
 	}
 
 	if custom.ResponseFormat != "" &&
@@ -223,25 +230,7 @@ func validateCustomEngine(custom *CustomEngineConfig) []string {
 		errs = append(errs, "engine.custom.timeout_seconds must be non-negative")
 	}
 
-	return append(errs, validateCustomTransportFields(custom)...)
-}
-
-// validateCustomTransportFields validates the transport-specific required fields.
-func validateCustomTransportFields(custom *CustomEngineConfig) []string {
-	switch custom.Transport {
-	case customTransportLocal:
-		if custom.Local == nil || custom.Local.Command == "" {
-			return []string{"engine.custom.local.command is required when transport is local"}
-		}
-	case customTransportHTTP:
-		if custom.HTTP == nil || custom.HTTP.URL == "" {
-			return []string{"engine.custom.http.url is required when transport is http"}
-		}
-		if custom.HTTP.Method != "" && custom.HTTP.Method != http.MethodPost {
-			return []string{fmt.Sprintf("engine.custom.http.method must be POST (got %q)", custom.HTTP.Method)}
-		}
-	}
-	return nil
+	return errs
 }
 
 func isValidRuntimeType(t string) bool {
