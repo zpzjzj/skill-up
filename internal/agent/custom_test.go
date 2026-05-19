@@ -232,6 +232,102 @@ func TestCustomAgent_RunLocal_NonZeroProcessExitFails(t *testing.T) {
 	if res == nil {
 		t.Fatal("expected session result to be preserved")
 	}
+	// The real process exit code must surface in the result, not the JSON's 0.
+	if res.ExitCode != 7 {
+		t.Fatalf("res.ExitCode = %d, want 7 (the process exit code)", res.ExitCode)
+	}
+}
+
+func TestCustomAgent_RunLocal_NilLocalConfigNoPanic(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// transport: local with no local block (can slip past validation via a
+	// --engine override) must error, not panic.
+	ag := customLocalAgent(&config.CustomEngineConfig{Transport: "local"})
+
+	_, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err == nil || !strings.Contains(err.Error(), "local.command is required") {
+		t.Fatalf("error = %v, want local.command required error", err)
+	}
+}
+
+func TestCustomAgent_RunLocal_FallbackTranscript(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// The engine returns final_message but no transcript.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"the answer"}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Transcript) != 2 {
+		t.Fatalf("transcript = %#v, want input message + assistant reply", res.Transcript)
+	}
+	if res.Transcript[0].Role != transcript.RoleUser ||
+		res.Transcript[1].Role != transcript.RoleAssistant ||
+		res.Transcript[1].Content != "the answer" {
+		t.Fatalf("unexpected fallback transcript: %#v", res.Transcript)
+	}
+}
+
+func TestCustomAgent_RunLocal_RejectsAPIKeyInArgs(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	ag := NewCustomAgent(Config{
+		Name:   "my-agent",
+		APIKey: "sk-super-secret",
+		Custom: &config.CustomEngineConfig{
+			Transport: "local",
+			Local: &config.CustomLocalConfig{
+				Command: "sh",
+				Args:    []string{"-c", "true", "--api-key", "${api_key}"},
+			},
+		},
+	})
+
+	_, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want rejection of API key in command line", err)
+	}
+}
+
+func TestCustomAgent_RunLocal_PathArtifactPreservesName(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	artifactDir := t.TempDir()
+	// The engine writes a file whose basename differs from the declared name.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args: []string{"-c", `mkdir -p outputs && echo body > outputs/gen-xyz.tmp && ` +
+				`echo '{"exit_code":0,"final_message":"ok","artifacts":{"files":[{"name":"report.md","path":"outputs/gen-xyz.tmp"}]}}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{ArtifactDir: artifactDir}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(artifactDir, "report.md")); statErr != nil {
+		t.Fatalf("artifact not archived under declared name: %v", statErr)
+	}
+	found := false
+	for _, gf := range res.Artifacts.GeneratedFiles {
+		if filepath.Base(gf) == "report.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("generated_files = %v, want an entry named report.md", res.Artifacts.GeneratedFiles)
+	}
 }
 
 func TestCustomAgent_RunLocal_TimeoutEnforced(t *testing.T) {

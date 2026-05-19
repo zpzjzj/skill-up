@@ -80,6 +80,12 @@ func (a *CustomAgent) Run(ctx context.Context, rt Runtime, opts ExecOptions, mes
 }
 
 func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions, messages []transcript.Message, custom *config.CustomEngineConfig) (*SessionResult, error) {
+	// Guard against a nil local block: validation skips engine.custom for
+	// built-in engines, so a `--engine` override can reach here unvalidated.
+	if custom.Local == nil {
+		return a.errorResult(0), errors.New("engine.custom.local.command is required when transport is local")
+	}
+
 	start := time.Now()
 	timeoutSec := custom.TimeoutSeconds
 	if timeoutSec <= 0 {
@@ -121,7 +127,7 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 	}
 
 	result, execErr := rt.Exec(execCtx, cmd, execOpts)
-	return a.finishLocal(ctx, rt, opts, custom, result, execErr, outputFile, start)
+	return a.finishLocal(ctx, rt, opts, custom, result, execErr, outputFile, start, messages)
 }
 
 // buildLocalExec renders the command, args and exec options for the local run.
@@ -131,11 +137,17 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 	if err != nil {
 		return "", ExecOptions{}, fmt.Errorf("render local.command: %w", err)
 	}
+	if a.containsAPIKey(command) {
+		return "", ExecOptions{}, errSecretInCommand("local.command")
+	}
 	parts := []string{shellQuote(command)}
 	for i, raw := range local.Args {
 		arg, rErr := renderTemplate(raw, vars)
 		if rErr != nil {
 			return "", ExecOptions{}, fmt.Errorf("render local.args[%d]: %w", i, rErr)
+		}
+		if a.containsAPIKey(arg) {
+			return "", ExecOptions{}, errSecretInCommand(fmt.Sprintf("local.args[%d]", i))
 		}
 		parts = append(parts, shellQuote(arg))
 	}
@@ -166,23 +178,26 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 }
 
 // finishLocal turns a runtime exec result into a SessionResult.
-func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, outputFile string, start time.Time) (*SessionResult, error) {
+func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, outputFile string, start time.Time, messages []transcript.Message) (*SessionResult, error) {
 	durationMs := time.Since(start).Milliseconds()
 	if execErr != nil {
 		res := a.errorResult(result.ExitCode)
 		res.DurationMs, res.Stderr = durationMs, result.Stderr
+		res.Transcript = minimalCustomTranscript(messages, "")
 		return res, fmt.Errorf("custom engine run failed: %w", execErr)
 	}
 
 	raw := a.readRawResult(ctx, rt, custom, result, outputFile)
 
 	if customResponseFormat(custom) == customResponseText {
+		finalMsg := strings.TrimSpace(raw)
 		res := &SessionResult{
 			Engine:       a.Name(),
 			ExitCode:     result.ExitCode,
 			DurationMs:   durationMs,
-			FinalMessage: strings.TrimSpace(raw),
+			FinalMessage: finalMsg,
 			Stderr:       result.Stderr,
+			Transcript:   minimalCustomTranscript(messages, finalMsg),
 			Artifacts:    &SessionArtifacts{},
 		}
 		if result.ExitCode != 0 {
@@ -191,13 +206,18 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 		return res, nil
 	}
 
-	res, err := a.parseSessionResult(ctx, opts, raw, durationMs)
+	res, err := a.parseSessionResult(ctx, rt, opts, raw, durationMs, messages)
 	if err != nil {
 		return res, err
 	}
 	// A non-zero process exit is a failed run even when the engine's JSON
 	// reports exit_code 0 (e.g. a wrapper that crashed after printing output).
+	// Reflect the real process exit/stderr so reports are not misleading.
 	if result.ExitCode != 0 {
+		res.ExitCode = result.ExitCode
+		if res.Stderr == "" {
+			res.Stderr = result.Stderr
+		}
 		return res, fmt.Errorf("custom engine command exited %d: %s", result.ExitCode, result.Stderr)
 	}
 	if res.ExitCode != 0 {
@@ -262,7 +282,7 @@ type parsedSessionResult struct {
 	Artifacts    *SessionArtifacts     `json:"artifacts"`
 }
 
-func (a *CustomAgent) parseSessionResult(ctx context.Context, opts ExecOptions, raw string, durationMs int64) (*SessionResult, error) {
+func (a *CustomAgent) parseSessionResult(ctx context.Context, rt Runtime, opts ExecOptions, raw string, durationMs int64, messages []transcript.Message) (*SessionResult, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return a.errorResult(0), errors.New("custom engine returned an empty result")
@@ -279,7 +299,14 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, opts ExecOptions, 
 	if artifacts == nil {
 		artifacts = &SessionArtifacts{}
 	}
-	a.collectArtifacts(ctx, opts, artifacts)
+	a.collectArtifacts(ctx, rt, opts, artifacts)
+
+	trans := parsed.Transcript
+	if len(trans) == 0 {
+		// Build the documented minimal transcript so judges still receive the
+		// conversation when the engine omits an explicit transcript.
+		trans = minimalCustomTranscript(messages, parsed.FinalMessage)
+	}
 
 	res := &SessionResult{
 		Engine:       firstNonEmpty(parsed.Engine, a.Name()),
@@ -291,7 +318,7 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, opts ExecOptions, 
 		OutputTokens: parsed.OutputTokens,
 		FinalMessage: parsed.FinalMessage,
 		Stderr:       parsed.Stderr,
-		Transcript:   parsed.Transcript,
+		Transcript:   trans,
 		Artifacts:    artifacts,
 	}
 	if res.DurationMs == 0 {
@@ -300,14 +327,45 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, opts ExecOptions, 
 	return res, nil
 }
 
+// minimalCustomTranscript builds a fallback transcript from the input messages
+// plus the engine's final assistant reply. It returns nil when there is nothing
+// to record.
+func minimalCustomTranscript(messages []transcript.Message, finalMsg string) transcript.Transcript {
+	trans := make(transcript.Transcript, 0, len(messages)+1)
+	maxTurn := 0
+	for _, m := range messages {
+		trans = append(trans, m)
+		if m.Turn > maxTurn {
+			maxTurn = m.Turn
+		}
+	}
+	if finalMsg != "" {
+		if maxTurn == 0 {
+			maxTurn = 1
+		}
+		trans = append(trans, transcript.Message{
+			Role:    transcript.RoleAssistant,
+			Content: finalMsg,
+			Turn:    maxTurn,
+		})
+	}
+	if len(trans) == 0 {
+		return nil
+	}
+	return trans
+}
+
 // collectArtifacts folds structured artifacts.files entries into the report
-// pipeline: file paths join generated_files; inline content is written to the
-// case artifact directory. url-based artifacts are deferred to the http phase.
-func (a *CustomAgent) collectArtifacts(ctx context.Context, opts ExecOptions, artifacts *SessionArtifacts) {
+// pipeline: path entries are registered (downloaded under their declared name
+// when it differs from the basename), inline content is written to the case
+// artifact directory. url-based artifacts are deferred to the http phase.
+func (a *CustomAgent) collectArtifacts(ctx context.Context, rt Runtime, opts ExecOptions, artifacts *SessionArtifacts) {
 	for _, f := range artifacts.Files {
 		switch {
 		case f.Path != "":
-			artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, f.Path)
+			if path := a.registerPathArtifact(ctx, rt, opts, f); path != "" {
+				artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, path)
+			}
 		case f.Content != "" || f.ContentBase64 != "":
 			if path := a.writeInlineArtifact(ctx, opts, f); path != "" {
 				artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, path)
@@ -316,6 +374,23 @@ func (a *CustomAgent) collectArtifacts(ctx context.Context, opts ExecOptions, ar
 			logging.DebugContextf(ctx, "CustomAgent: artifact %q url is not downloaded in the local transport", f.Name)
 		}
 	}
+}
+
+// registerPathArtifact returns a runtime/host path for a path-based artifact.
+// When the declared name differs from the file's basename, it materializes the
+// file into the case artifact directory under that name so the archiver (which
+// keys on basename) preserves the declared artifact name.
+func (a *CustomAgent) registerPathArtifact(ctx context.Context, rt Runtime, opts ExecOptions, f ArtifactFile) string {
+	name := filepath.Base(f.Name)
+	if f.Name == "" || opts.ArtifactDir == "" || name == filepath.Base(f.Path) {
+		return f.Path
+	}
+	dest := filepath.Join(opts.ArtifactDir, name)
+	if err := rt.DownloadFile(ctx, f.Path, dest); err != nil {
+		logging.WarnContextf(ctx, "CustomAgent: cannot archive artifact %q from %s, keeping original path: %v", name, f.Path, err)
+		return f.Path
+	}
+	return dest
 }
 
 // writeInlineArtifact materializes an inline artifact into the case artifact
@@ -340,6 +415,20 @@ func (a *CustomAgent) writeInlineArtifact(ctx context.Context, opts ExecOptions,
 		return ""
 	}
 	return path
+}
+
+// containsAPIKey reports whether s embeds the configured API key value, used
+// to keep credentials out of the rendered command line.
+func (a *CustomAgent) containsAPIKey(s string) bool {
+	return a.Cfg.APIKey != "" && strings.Contains(s, a.Cfg.APIKey)
+}
+
+// errSecretInCommand reports a rendered command/arg that would leak a credential.
+func errSecretInCommand(field string) error {
+	return fmt.Errorf(
+		"engine.custom.%s renders the API key into the command line, which would expose it in process listings and traces; reference ${api_key} from engine.custom.env instead",
+		field,
+	)
 }
 
 func (a *CustomAgent) errorResult(exitCode int) *SessionResult {
