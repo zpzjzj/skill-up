@@ -20,6 +20,19 @@ func isSensitiveEnvName(name string) bool {
 	return sensitiveEnvNamePattern.MatchString(name)
 }
 
+// isSensitiveTemplateVar reports whether a built-in template variable carries a
+// credential: ${api_key}, or a ${kwargs.<key>} whose key name looks secret-like.
+// Such variables must not be rendered into a command line.
+func isSensitiveTemplateVar(name string) bool {
+	if name == "api_key" {
+		return true
+	}
+	if key, ok := strings.CutPrefix(name, "kwargs."); ok {
+		return isSensitiveEnvName(key)
+	}
+	return false
+}
+
 // builtinTemplateVars is the set of run-time template variable names provided
 // by skill-up. References to these are left intact during config-time env
 // resolution and resolved later when a custom engine runs a case.
@@ -278,6 +291,12 @@ func resolveEnvToken(inner string, rejectSecrets bool) (value string, leaveIntac
 	}
 
 	if IsBuiltinTemplateVar(name) {
+		if rejectSecrets && isSensitiveTemplateVar(name) {
+			return "", false, fmt.Errorf(
+				"secret-like template variable ${%s} must not be referenced in a command line; pass credentials via engine.custom.env instead",
+				name,
+			)
+		}
 		return "", true, nil
 	}
 

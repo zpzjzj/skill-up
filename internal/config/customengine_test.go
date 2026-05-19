@@ -174,6 +174,52 @@ func TestResolveCustomEngineConfig_AllowsNonSecretEnvInCommand(t *testing.T) {
 	}
 }
 
+func TestResolveCustomEngineConfig_RejectsSecretKwargInCommand(t *testing.T) {
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Kwargs:    map[string]string{"token": "super-secret"},
+		Local: &CustomLocalConfig{
+			Command: "/opt/agent",
+			Args:    []string{"--token", "${kwargs.token}"},
+		},
+	})
+
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want a secret kwarg reference rejected", err)
+	}
+}
+
+func TestResolveCustomEngineConfig_RejectsAPIKeyTemplateInCommand(t *testing.T) {
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local: &CustomLocalConfig{
+			Command: "/opt/agent",
+			Args:    []string{"--key", "${api_key}"},
+		},
+	})
+
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want ${api_key} rejected in a command line", err)
+	}
+}
+
+func TestResolveCustomEngineConfig_AllowsNonSecretKwargInCommand(t *testing.T) {
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Kwargs:    map[string]string{"profile": "strict"},
+		Local: &CustomLocalConfig{
+			Command: "/opt/agent",
+			Args:    []string{"--profile", "${kwargs.profile}"},
+		},
+	})
+
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("ResolveCustomEngineConfig: %v", err)
+	}
+}
+
 func TestIsSensitiveEnvName(t *testing.T) {
 	for _, name := range []string{"CUSTOM_AGENT_TOKEN", "OPENAI_API_KEY", "MY_SECRET", "DB_PASSWORD", "GH_ACCESS_KEY"} {
 		if !isSensitiveEnvName(name) {
