@@ -29,6 +29,11 @@ func DetectAgent(engineName string, cfg Config) (Agent, error) {
 	case codexEngineName:
 		return NewCodexAgent(cfg), nil
 	default:
+		// A non-built-in engine name is a Custom Engine when engine.custom
+		// is configured; otherwise it is unsupported.
+		if cfg.Custom != nil {
+			return NewCustomAgent(cfg), nil
+		}
 		return nil, &UnsupportedAgentError{Name: engineName}
 	}
 }
@@ -49,6 +54,7 @@ func DetectAgentWithInitParams(engineName string, params credential.AgentInitPar
 		APIKey:        params.APIKey,
 		BaseURL:       params.BaseURL,
 		EnvVars:       make(map[string]string),
+		Custom:        params.Custom,
 	}
 
 	switch engineName {

@@ -206,10 +206,10 @@ func TestResolveRunnerInitParams_PrefersProviderEnvOverResolver(t *testing.T) {
 		BaseURL:  "https://file.example.com/v1",
 	}
 
-	params := ResolveRunnerInitParams("codex", config.ModelConfig{
+	params := ResolveRunnerInitParams("codex", config.EngineConfig{Model: config.ModelConfig{
 		Provider: "openai",
 		Name:     "gpt-5.4",
-	}, r, "", "")
+	}}, r, "", "")
 
 	if params.Kind != AgentKindRunner {
 		t.Fatalf("Kind = %q, want %q", params.Kind, AgentKindRunner)
@@ -233,7 +233,7 @@ func TestResolveRunnerInitParams_DoesNotScanProviderEnvWhenProviderMissing(t *te
 	t.Setenv("OPENAI_API_KEY", "sk-env-openai")
 	t.Setenv("OPENAI_BASE_URL", "https://env.example.com/v1")
 
-	params := ResolveRunnerInitParams("codex", config.ModelConfig{Name: "gpt-5.4"}, nil, "", "")
+	params := ResolveRunnerInitParams("codex", config.EngineConfig{Model: config.ModelConfig{Name: "gpt-5.4"}}, nil, "", "")
 
 	if params.Provider != "" {
 		t.Fatalf("Provider = %q, want empty", params.Provider)
@@ -256,10 +256,10 @@ func TestResolveRunnerInitParams_PrefersCLIOverrides(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "gpt-5.5-env")
 	t.Setenv("OPENAI_API_KEY", "sk-env-openai")
 
-	params := ResolveRunnerInitParams("codex", config.ModelConfig{
+	params := ResolveRunnerInitParams("codex", config.EngineConfig{Model: config.ModelConfig{
 		Provider: "openai",
 		Name:     "gpt-5.4",
-	}, nil, "gpt-5.6-cli", "sk-cli-openai")
+	}}, nil, "gpt-5.6-cli", "sk-cli-openai")
 
 	if params.Model != "gpt-5.6-cli" || params.ModelSource != ValueSourceCLI {
 		t.Fatalf("unexpected CLI model resolution: %#v", params)
@@ -274,10 +274,10 @@ func TestResolveRunnerInitParams_LogsCLIAPIKeySource(t *testing.T) {
 	defer logging.SetVerbosity(0)
 
 	output := captureLogOutput(t, func() {
-		ResolveRunnerInitParams("codex", config.ModelConfig{
+		ResolveRunnerInitParams("codex", config.EngineConfig{Model: config.ModelConfig{
 			Provider: "openai",
 			Name:     "gpt-5.4",
-		}, nil, "", "sk-cli-openai")
+		}}, nil, "", "sk-cli-openai")
 	})
 
 	if !strings.Contains(output, "source.api_key=cli") {
@@ -290,9 +290,9 @@ func TestResolveRunnerInitParams_LogsCLIAPIKeySource(t *testing.T) {
 
 func TestResolveRunnerInitParams_WarnsWhenCLIAPIKeyHasNoProvider(t *testing.T) {
 	output := captureLogOutput(t, func() {
-		params := ResolveRunnerInitParams("codex", config.ModelConfig{
+		params := ResolveRunnerInitParams("codex", config.EngineConfig{Model: config.ModelConfig{
 			Name: "gpt-5.4",
-		}, nil, "", "sk-cli-openai")
+		}}, nil, "", "sk-cli-openai")
 
 		if params.APIKey != "" {
 			t.Fatalf("APIKey = %q, want empty when provider is missing", params.APIKey)
@@ -431,10 +431,10 @@ func TestResolveRunnerInitParams_UsesGenericProviderScopedEnv(t *testing.T) {
 	t.Setenv("DASHSCOPE_API_KEY", "dashscope-env-key")
 	t.Setenv("DASHSCOPE_BASE_URL", "https://dashscope.example.com")
 
-	params := ResolveRunnerInitParams("custom", config.ModelConfig{
+	params := ResolveRunnerInitParams("custom", config.EngineConfig{Model: config.ModelConfig{
 		Provider: "dashscope",
 		Name:     "qwen-max",
-	}, nil, "", "")
+	}}, nil, "", "")
 
 	if params.Model != "qwen-max-env" || params.ModelSource != ValueSourceEnv {
 		t.Fatalf("unexpected model resolution: %#v", params)

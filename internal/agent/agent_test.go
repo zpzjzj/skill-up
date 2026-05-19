@@ -333,7 +333,7 @@ func TestUnsupportedAgentError(t *testing.T) {
 	t.Parallel()
 
 	err := &UnsupportedAgentError{Name: "test-agent"}
-	if err.Error() != "unsupported agent: test-agent" {
+	if err.Error() != `unsupported agent "test-agent": missing engine.custom` {
 		t.Errorf("unexpected error message: %s", err.Error())
 	}
 }

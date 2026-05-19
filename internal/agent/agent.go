@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/alibaba/skill-up/internal/config"
 	"github.com/alibaba/skill-up/internal/credential"
 	"github.com/alibaba/skill-up/internal/logging"
 	"github.com/alibaba/skill-up/internal/observability"
@@ -41,9 +42,21 @@ type SessionResult struct {
 
 // SessionArtifacts holds artifacts produced during an agent session.
 type SessionArtifacts struct {
-	WorkspaceDiff  string   `json:"workspace_diff,omitempty"`
-	GeneratedFiles []string `json:"generated_files,omitempty"` // Runtime file paths, e.g. ["outputs/stdout.json", "outputs/transcript.jsonl"]
-	Logs           string   `json:"logs,omitempty"`
+	WorkspaceDiff  string         `json:"workspace_diff,omitempty"`
+	GeneratedFiles []string       `json:"generated_files,omitempty"` // Runtime file paths, e.g. ["outputs/stdout.json", "outputs/transcript.jsonl"]
+	Files          []ArtifactFile `json:"files,omitempty"`           // Structured artifact declarations (Custom Engine).
+	Logs           string         `json:"logs,omitempty"`
+}
+
+// ArtifactFile is a structured artifact declaration returned by an agent.
+// Exactly one of Path, URL, Content, ContentBase64 should be set.
+type ArtifactFile struct {
+	Name          string `json:"name"`
+	Path          string `json:"path,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Content       string `json:"content,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	ContentType   string `json:"content_type,omitempty"`
 }
 
 // Config configures the agent.
@@ -65,6 +78,9 @@ type Config struct {
 	ModelProvider string
 	APIKey        string
 	BaseURL       string
+	// Custom carries the custom engine configuration when Name does not match
+	// a built-in agent. It is nil for built-in agents.
+	Custom *config.CustomEngineConfig
 }
 
 // Runtime is an alias for runtime.Runtime for agent package convenience.

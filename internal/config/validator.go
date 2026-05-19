@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -18,6 +19,30 @@ const (
 	runtimeTypeNone        = "none"
 	runtimeTypeOpenSandbox = "opensandbox"
 )
+
+// Custom engine transport constants.
+const (
+	customTransportLocal = "local"
+	customTransportHTTP  = "http"
+)
+
+// builtinEngineNames mirrors the built-in agents recognized by the agent
+// factory (internal/agent/factory.go). It is duplicated here — rather than
+// imported — to avoid a config -> agent import cycle (agent imports config for
+// CustomEngineConfig). Keep the two lists in sync when adding a built-in agent.
+var builtinEngineNames = map[string]struct{}{
+	"claude_code": {},
+	"claude-code": {},
+	"codex":       {},
+	"qodercli":    {},
+	"qoder":       {},
+	"qoder-cli":   {},
+}
+
+func isBuiltinEngineName(name string) bool {
+	_, ok := builtinEngineNames[name]
+	return ok
+}
 
 // Validator checks eval and case documents against the v1alpha1 schema.
 type Validator struct{}
@@ -51,6 +76,8 @@ func (v *Validator) ValidateEvalConfig(cfg *EvalConfig) error {
 	if cfg.Engine.Name == "" {
 		errs = append(errs, "engine.name is required")
 	}
+
+	errs = append(errs, validateEngine(cfg.Engine)...)
 
 	// engine.model.provider and engine.model.name are optional.
 	// When omitted, the engine uses its local default model configuration.
@@ -157,6 +184,63 @@ func (v *Validator) ValidateAll(result *EvalResult) error {
 		}
 	}
 
+	return nil
+}
+
+// validateEngine checks engine.custom against the Custom Engine contract.
+// A non-built-in engine.name requires an engine.custom block; a built-in
+// engine.name ignores engine.custom entirely.
+func validateEngine(engine EngineConfig) []string {
+	if engine.Name == "" {
+		return nil
+	}
+	if isBuiltinEngineName(engine.Name) {
+		return nil
+	}
+	if engine.Custom == nil {
+		return []string{fmt.Sprintf("unsupported agent %q: missing engine.custom", engine.Name)}
+	}
+	return validateCustomEngine(engine.Custom)
+}
+
+func validateCustomEngine(custom *CustomEngineConfig) []string {
+	var errs []string
+
+	switch custom.Transport {
+	case "":
+		errs = append(errs, "engine.custom.transport is required (local, http)")
+	case customTransportLocal, customTransportHTTP:
+	default:
+		errs = append(errs, fmt.Sprintf("engine.custom.transport must be one of: local, http (got %q)", custom.Transport))
+	}
+
+	if custom.ResponseFormat != "" &&
+		custom.ResponseFormat != "session_result" && custom.ResponseFormat != "text" {
+		errs = append(errs, fmt.Sprintf("engine.custom.response_format must be one of: session_result, text (got %q)", custom.ResponseFormat))
+	}
+
+	if custom.TimeoutSeconds < 0 {
+		errs = append(errs, "engine.custom.timeout_seconds must be non-negative")
+	}
+
+	return append(errs, validateCustomTransportFields(custom)...)
+}
+
+// validateCustomTransportFields validates the transport-specific required fields.
+func validateCustomTransportFields(custom *CustomEngineConfig) []string {
+	switch custom.Transport {
+	case customTransportLocal:
+		if custom.Local == nil || custom.Local.Command == "" {
+			return []string{"engine.custom.local.command is required when transport is local"}
+		}
+	case customTransportHTTP:
+		if custom.HTTP == nil || custom.HTTP.URL == "" {
+			return []string{"engine.custom.http.url is required when transport is http"}
+		}
+		if custom.HTTP.Method != "" && custom.HTTP.Method != http.MethodPost {
+			return []string{fmt.Sprintf("engine.custom.http.method must be POST (got %q)", custom.HTTP.Method)}
+		}
+	}
 	return nil
 }
 

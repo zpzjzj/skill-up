@@ -46,6 +46,10 @@ type AgentInitParams struct {
 	APIKey   string
 	BaseURL  string
 
+	// Custom carries the custom engine config when the engine name does not
+	// match a built-in agent. It is nil for built-in agents.
+	Custom *config.CustomEngineConfig
+
 	ProviderSource ValueSource
 	ModelSource    ValueSource
 	APIKeySource   ValueSource
@@ -63,20 +67,22 @@ type agentResolveInput struct {
 	resolver    *Resolver
 	cliModel    string
 	cliAPIKey   string
+	custom      *config.CustomEngineConfig
 }
 
 // ResolveRunnerInitParams resolves the final init params for the runner agent.
-func ResolveRunnerInitParams(engine string, modelCfg config.ModelConfig, resolver *Resolver, cliModel string, cliAPIKey string) AgentInitParams {
+func ResolveRunnerInitParams(engine string, engineCfg config.EngineConfig, resolver *Resolver, cliModel string, cliAPIKey string) AgentInitParams {
 	return resolveAgentInitParams(agentResolveInput{
 		kind:        AgentKindRunner,
 		engine:      engine,
-		provider:    modelCfg.Provider,
-		model:       modelCfg.Name,
-		baseURL:     modelCfg.BaseURL,
+		provider:    engineCfg.Model.Provider,
+		model:       engineCfg.Model.Name,
+		baseURL:     engineCfg.Model.BaseURL,
 		valueSource: ValueSourceConfig,
 		resolver:    resolver,
 		cliModel:    cliModel,
 		cliAPIKey:   cliAPIKey,
+		custom:      engineCfg.Custom,
 	})
 }
 
@@ -96,6 +102,7 @@ func ResolveJudgeInitParams(engine string, judgeCfg config.JudgeConfig, runner A
 		valueSource: ValueSourceJudge,
 		fallback:    fallback,
 		resolver:    resolver,
+		custom:      runner.Custom,
 	})
 }
 
@@ -115,6 +122,7 @@ func resolveAgentInitParams(in agentResolveInput) AgentInitParams {
 		Provider: in.provider,
 		Model:    in.model,
 		BaseURL:  in.baseURL,
+		Custom:   in.custom,
 	}
 	if params.Provider != "" {
 		params.ProviderSource = in.valueSource

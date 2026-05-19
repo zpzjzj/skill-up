@@ -220,7 +220,7 @@ func loadCredentialsAndAgent(cmd *cobra.Command, evalCfg *config.EvalConfig) (ag
 
 	runnerParams := credential.ResolveRunnerInitParams(
 		evalCfg.Engine.Name,
-		evalCfg.Engine.Model,
+		evalCfg.Engine,
 		resolver,
 		normalizeCLIModelOverride(cliModel),
 		cliAPIKey,
