@@ -132,8 +132,13 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 	}
 
 	// Remove any stale output file so a result left by a fixture or a previous
-	// run is never mistaken for this invocation's output.
-	clearedStaleOutput := a.clearStaleOutputFile(ctx, rt, outputFile)
+	// run is never mistaken for this invocation's output. Only an explicitly
+	// configured output_file is cleared — the default ${output_file} path is
+	// left untouched, as it may be ordinary fixture input the agent reads.
+	clearedStaleOutput := false
+	if custom.Local.OutputFile != "" {
+		clearedStaleOutput = a.clearStaleOutputFile(ctx, rt, outputFile)
+	}
 
 	cmd, execOpts, err := a.buildLocalExec(ctx, rt, opts, custom, vars, timeoutSec)
 	if err != nil {
@@ -323,21 +328,20 @@ func (a *CustomAgent) registerFrameworkIO(res *SessionResult, inputFile, outputF
 	}
 }
 
-// readRawResult reads the result payload from the output file when present,
-// otherwise from stdout. The output file is consulted even when local.output_file
-// is omitted, since a custom engine may write to the default ${output_file}
-// path; a missing default file simply falls back to stdout. The boolean reports
-// whether the output file was produced (exists in the runtime) — independent of
-// whether it actually supplied the payload — so an empty produced file is still
-// excluded from workspace diffs.
+// readRawResult reads the result payload from the output file, or from stdout.
+// Per the contract, the output file is read only when local.output_file is
+// explicitly configured; when it is unset the result comes from stdout and the
+// default ${output_file} path is left untouched (it may be ordinary fixture
+// input). The boolean reports whether the configured output file was produced
+// (exists in the runtime) — independent of whether it supplied the payload —
+// so an empty produced file is still excluded from workspace diffs.
 func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *config.CustomEngineConfig, result ExecResult, outputFile string) (raw string, produced bool) {
-	if outputFile == "" {
+	if custom.Local.OutputFile == "" || outputFile == "" {
 		return result.Stdout, false
 	}
-	explicit := custom.Local.OutputFile != ""
 
 	// A per-call temp file avoids collisions when parallel cases share the
-	// same output_file basename (e.g. the documented default).
+	// same output_file basename.
 	tmpFile, err := os.CreateTemp("", "skill-up-custom-result-*")
 	if err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot create temp file for output_file %s, falling back to stdout: %v", outputFile, err)
@@ -348,11 +352,7 @@ func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *con
 	defer func() { _ = os.Remove(tmp) }()
 
 	if err := rt.DownloadFile(ctx, outputFile, tmp); err != nil {
-		if explicit {
-			logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
-		} else {
-			logging.DebugContextf(ctx, "CustomAgent: default output_file %s not produced, using stdout", outputFile)
-		}
+		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
 		return result.Stdout, false
 	}
 	// The output file exists in the runtime; it is "produced" even if empty.

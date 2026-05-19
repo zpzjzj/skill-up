@@ -76,28 +76,6 @@ func TestCustomAgent_RunLocal_OutputFile(t *testing.T) {
 	}
 }
 
-func TestCustomAgent_RunLocal_DefaultOutputFile(t *testing.T) {
-	t.Parallel()
-	rt := newCustomTestRuntime(t)
-	// output_file is not configured, but the command writes to the default
-	// ${output_file} path; readRawResult must prefer it over stdout.
-	ag := customLocalAgent(&config.CustomEngineConfig{
-		Transport: "local",
-		Local: &config.CustomLocalConfig{
-			Command: "sh",
-			Args:    []string{"-c", `mkdir -p "$(dirname '${output_file}')" && echo '{"exit_code":0,"final_message":"from-default-file"}' > '${output_file}' && echo noise-on-stdout`},
-		},
-	})
-
-	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.FinalMessage != "from-default-file" {
-		t.Fatalf("final_message = %q, want from-default-file", res.FinalMessage)
-	}
-}
-
 func TestCustomAgent_RunLocal_RelativeCwd(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
@@ -212,6 +190,11 @@ func TestCustomAgent_RunLocal_IgnoresStaleOutputFile(t *testing.T) {
 	if res.FinalMessage != "fresh-stdout" {
 		t.Fatalf("final_message = %q, want fresh-stdout (stale output file must be ignored)", res.FinalMessage)
 	}
+	// output_file was not configured, so the default path must be left
+	// untouched — it may be ordinary fixture input.
+	if _, statErr := os.Stat(stale); statErr != nil {
+		t.Fatalf("default output file was removed though output_file is unset: %v", statErr)
+	}
 }
 
 func TestCustomAgent_RunLocal_KwargsInOutputFilePath(t *testing.T) {
@@ -241,20 +224,20 @@ func TestCustomAgent_RunLocal_KwargsInOutputFilePath(t *testing.T) {
 func TestCustomAgent_RunLocal_ClearedStaleOutputRegistered(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
-	// A fixture pre-creates the default output file; the command returns its
-	// result on stdout and never recreates it.
-	stale := filepath.Join(rt.Workspace(), "outputs", "session-result.json")
-	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// With an explicitly configured output_file, a stale file from a previous
+	// run is cleared before the run; that path must be registered so the
+	// deletion is excluded from workspace diffs even when the engine returns
+	// its result on stdout and never recreates the file.
+	stale := filepath.Join(rt.Workspace(), "result.json")
 	if err := os.WriteFile(stale, []byte(`{"exit_code":0,"final_message":"STALE"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ag := customLocalAgent(&config.CustomEngineConfig{
 		Transport: "local",
 		Local: &config.CustomLocalConfig{
-			Command: "sh",
-			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"fresh"}'`},
+			Command:    "sh",
+			OutputFile: "result.json",
+			Args:       []string{"-c", `echo '{"exit_code":0,"final_message":"fresh"}'`},
 		},
 	})
 
@@ -262,9 +245,7 @@ func TestCustomAgent_RunLocal_ClearedStaleOutputRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// The framework deleted the stale file; that path must still be registered
-	// so the deletion is excluded from workspace diffs.
-	if !containsBasename(res.Artifacts.GeneratedFiles, "session-result.json") {
+	if !containsBasename(res.Artifacts.GeneratedFiles, "result.json") {
 		t.Fatalf("generated_files = %v, want the cleared output path registered", res.Artifacts.GeneratedFiles)
 	}
 }
@@ -541,16 +522,6 @@ func TestCustomAgent_RunLocal_PartialResultOnTimeout(t *testing.T) {
 	if res.ExitCode == 0 {
 		t.Fatalf("res.ExitCode = 0, want a non-zero code for an interrupted run")
 	}
-}
-
-func TestCustomAgent_RunLocal_RegistersEmptyOutputFile(t *testing.T) {
-	t.Parallel()
-	// The engine creates the default output file but leaves it empty and
-	// returns the result on stdout; the produced file must still be
-	// registered for diff exclusion.
-	assertCustomGeneratedFile(t,
-		[]string{"-c", `mkdir -p outputs && : > outputs/session-result.json && echo '{"exit_code":0,"final_message":"ok"}'`},
-		"session-result.json")
 }
 
 func TestCustomAgent_RunLocal_RendersTemplatedKwargs(t *testing.T) {
