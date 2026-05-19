@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/alibaba/skill-up/internal/logging"
 	"github.com/alibaba/skill-up/internal/observability"
+	"github.com/alibaba/skill-up/internal/platform"
 )
 
 const (
@@ -168,7 +170,7 @@ func (r *NoneRuntime) Exec(ctx context.Context, command string, opts ExecOptions
 	defer span.End()
 	startTime := time.Now()
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	cmd := platform.NewShellCmd(ctx, command)
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	} else {
@@ -276,4 +278,10 @@ func (r *NoneRuntime) Workspace() string {
 // RequiresProcessSandbox keeps local agent execution constrained.
 func (r *NoneRuntime) RequiresProcessSandbox() bool {
 	return true
+}
+
+// TargetGOOS reports the host OS, since NoneRuntime executes commands directly
+// on the host.
+func (r *NoneRuntime) TargetGOOS() string {
+	return goruntime.GOOS
 }
