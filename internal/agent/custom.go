@@ -572,7 +572,7 @@ func (a *CustomAgent) completeTemplateVars(baseVars, renderedKwargs map[string]s
 		return nil, fmt.Errorf("marshal kwargs: %w", err)
 	}
 
-	vars := make(map[string]string, len(baseVars)+len(renderedKwargs)+6)
+	vars := make(map[string]string)
 	maps.Copy(vars, baseVars)
 	vars["messages"] = string(msgsJSON)
 	vars["messages_json"] = string(msgsJSON)
