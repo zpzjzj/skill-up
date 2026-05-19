@@ -1,29 +1,46 @@
-# Custom Engine 设计
+# Custom Engine Design
 
-> **实现状态**：本文档描述 Custom Engine 的完整设计（`local` 与 `http` 两种 transport）。
-> 当前阶段（Phase 1）已实现 `transport: local`；`transport: http` 已完成设计与配置 schema，
-> 但实现将在后续 PR 中落地，配置选用 `http` 时 `skill-eval` 会返回明确的“尚未实现”错误。
+> **Implementation status**: This document describes the full Custom Engine design
+> (both the `local` and `http` transports). The current phase (Phase 1) implements
+> `transport: local`; `transport: http` is fully designed and its config schema is
+> parsed and validated, but the implementation lands in a later PR. Selecting `http`
+> today is rejected by validation with a clear "not yet implemented" error.
 
-本文定义 `skill-eval` 的 Custom Engine 配置接口和返回结果规约。Custom Engine 用于接入未内置支持的 Agent 执行器，例如本地 CLI、脚本、内部调度任务，或远程 HTTP Agent 服务。
+This document defines the Custom Engine configuration interface and result contract
+for `skill-eval`. A Custom Engine is used to integrate agent executors that are not
+built in — for example a local CLI, a script, an internal scheduled job, or a remote
+HTTP agent service.
 
-## 目标
+## Goals
 
-- 支持两类调用方式：`local` 本地任务调用和 `http` 远程服务调用。
-- 支持在配置中引用环境变量，用于命令路径、URL、Header、Token、模型参数等。
-- 对 runner / evaluator / judge 暴露统一的 `SessionResult`，不让下游关心 Engine 的具体调用方式。
-- 保持 runtime 边界清晰：本地任务必须通过 `runtime.Exec` 在当前 runtime workspace 内执行。
+- Support two invocation styles: `local` (local task execution) and `http` (remote
+  service calls).
+- Support referencing environment variables in the config — for command paths, URLs,
+  headers, tokens, model parameters, etc.
+- Expose a unified `SessionResult` to the runner / evaluator / judge, so downstream
+  code does not need to know how the engine was invoked.
+- Keep the runtime boundary clear: a local task must run inside the current runtime
+  workspace via `runtime.Exec`.
 
-## 非目标
+## Non-goals
 
-- 不兼容旧设计中的 `engine.entry` 单字段配置。
-- `engine.name` 命中内置 Agent 时，不读取 `engine.custom`。
-- `skill-eval` 对所有 Agent 都不提供任何隐式文件同步逻辑。无论是内置 Agent、Custom Agent，还是 Custom Engine 的 `local` / `http` transport，只有返回结果中显式声明的产物会被下载或写入本地报告目录。
+- No compatibility with the old single-field `engine.entry` config.
+- When `engine.name` matches a built-in agent, `engine.custom` is not read.
+- `skill-eval` provides no implicit file-sync behavior for any agent. Whether it is a
+  built-in agent, a Custom Agent, or a Custom Engine's `local` / `http` transport,
+  only artifacts explicitly declared in the result are downloaded or written into the
+  local report directory.
 
-## 配置入口
+## Configuration entry point
 
-`engine.name` 是用户自定义 Agent 名称；`engine.model` 是可选配置，仅当 custom agent 需要通过模板变量引用模型信息时才需填写。
+`engine.name` is the user-defined agent name; `engine.model` is optional and only
+needs to be filled in when the custom agent references model information through
+template variables.
 
-当 `engine.name` 命中内置 Agent（例如 `claude_code`、`codex`、`qodercli`）时，`skill-eval` 使用内置实现。当 `engine.name` 没有命中内置 Agent 时，必须提供 `engine.custom`，`skill-eval` 按 Custom Engine 配置创建 agent。
+When `engine.name` matches a built-in agent (for example `claude_code`, `codex`,
+`qodercli`), `skill-eval` uses the built-in implementation. When `engine.name` does
+not match a built-in agent, `engine.custom` must be provided, and `skill-eval`
+creates the agent from the Custom Engine config.
 
 ```yaml
 engine:
@@ -35,22 +52,25 @@ engine:
       max_files: "20"
 ```
 
-如果 `engine.name` 没有命中内置 Agent 且未提供 `engine.custom`，应报配置错误，例如 `unsupported agent "my-agent": missing engine.custom`。
+If `engine.name` does not match a built-in agent and `engine.custom` is not provided,
+a config error is reported, e.g. `unsupported agent "my-agent": missing engine.custom`.
 
-## 接入者最小契约
+## Minimum integration contract
 
-接入 Custom Engine 时，你需要做三件事：
+When integrating a Custom Engine, you need to do three things:
 
-1. 在 `eval.yaml` 中选择 `transport: local` 或 `transport: http`。
-2. 让你的 agent 接收标准 `SessionInput`。
-3. 让你的 agent 返回标准 `SessionResult`。
+1. Choose `transport: local` or `transport: http` in `eval.yaml`.
+2. Make your agent accept the standard `SessionInput`.
+3. Make your agent return the standard `SessionResult`.
 
-`local` 和 `http` 的差异只在“怎么传输”：
+The difference between `local` and `http` is only "how it is transported":
 
-- local agent 从输入文件读取 `SessionInput`，把 `SessionResult` 写到 output file 或 stdout。
-- HTTP agent 从 JSON body 或 multipart `payload` 读取 `SessionInput`，把 `SessionResult` 作为 HTTP response body 返回。
+- A local agent reads `SessionInput` from the input file and writes `SessionResult`
+  to the output file or to stdout.
+- An HTTP agent reads `SessionInput` from the JSON body or the multipart `payload`
+  field, and returns `SessionResult` as the HTTP response body.
 
-### 最小 local 配置
+### Minimal local config
 
 ```yaml
 engine:
@@ -72,9 +92,10 @@ engine:
       output_file: ${output_file}
 ```
 
-local agent 需要读取 `${input_file}` 中的 `SessionInput`，并把 `SessionResult` JSON 写到 `${output_file}`。
+The local agent reads `SessionInput` from `${input_file}` and writes the
+`SessionResult` JSON to `${output_file}`.
 
-### 最小 HTTP 配置
+### Minimal HTTP config
 
 ```yaml
 engine:
@@ -90,22 +111,28 @@ engine:
       request_body: ${session_input}
 ```
 
-HTTP agent 需要接收 `SessionInput` JSON，并返回 `SessionResult` JSON。若配置了 `custom.http.files`，请求会变成 multipart，`SessionInput` 放在 `payload` 字段中。
+The HTTP agent receives the `SessionInput` JSON and returns the `SessionResult` JSON.
+If `custom.http.files` is configured, the request becomes a multipart request and
+`SessionInput` is placed in the `payload` field.
 
-### 对接检查清单
+### Integration checklist
 
-接入方实现完成前，应逐项确认：
+Before completing an integration, confirm each item:
 
-- 能读取 `SessionInput.messages`，并把它当作完整会话历史处理。
-- 能读取 `SessionInput.kwargs`，所有值按字符串处理。
-- 需要 workspace 文件时，只依赖 `custom.http.files` 或 local runtime workspace 中的显式路径。
-- 成功和失败都返回可解析的 `SessionResult`。
-- 至少返回 `exit_code` 和 `final_message`。
-- 需要归档的文件都写进 `SessionResult.artifacts`，不依赖 `skill-eval` 自动扫描。
-- 不要求在 `eval.yaml` 中写 secret；API Key 通过 `${api_key}` 引用解析后的凭据。
-- 不依赖跨 case、跨 variant 或跨 iteration 的隐式会话状态。
+- It can read `SessionInput.messages` and treat it as the complete conversation
+  history.
+- It can read `SessionInput.kwargs`, treating every value as a string.
+- When it needs workspace files, it relies only on `custom.http.files` or on explicit
+  paths inside the local runtime workspace.
+- It returns a parseable `SessionResult` for both success and failure.
+- It returns at least `exit_code` and `final_message`.
+- Every file that needs to be archived is written into `SessionResult.artifacts`,
+  not relying on `skill-eval` to auto-scan.
+- It does not require secrets to be written into `eval.yaml`; the API key is
+  referenced through `${api_key}` after credential resolution.
+- It does not depend on implicit session state across cases, variants, or iterations.
 
-最小 `SessionResult`：
+Minimal `SessionResult`:
 
 ```json
 {
@@ -114,7 +141,7 @@ HTTP agent 需要接收 `SessionInput` JSON，并返回 `SessionResult` JSON。�
 }
 ```
 
-## 完整配置 Schema
+## Full configuration schema
 
 ```yaml
 engine:
@@ -151,65 +178,86 @@ engine:
         string: any
 ```
 
-### 字段说明
+### Field reference
 
-| 字段 | 必填 | 说明 |
+| Field | Required | Description |
 | --- | --- | --- |
-| `engine.name` | 是 | Agent 名称；命中内置 Agent 时使用内置实现，否则读取 `engine.custom` |
-| `custom.transport` | 是 | 调用方式，支持 `local` 或 `http` |
-| `custom.timeout_seconds` | 否 | Engine 调用超时；未设置时使用 case timeout |
-| `custom.response_format` | 否 | 返回结果解析方式，默认 `session_result`；推荐保持默认值 |
-| `custom.env` | 否 | 自定义环境变量；local 会注入进程环境，HTTP 不会自动发送 |
-| `custom.kwargs` | 否 | 传给 custom engine 的自定义参数，类型为 `dict[str]string` |
-| `custom.local.command` | local 必填 | runtime 内可执行命令 |
-| `custom.local.args` | 否 | 命令参数数组 |
-| `custom.local.cwd` | 否 | 命令工作目录；默认 `${workspace}` |
-| `custom.local.input_file` | 否 | runtime 内的输入文件路径；默认 `${input_file}` |
-| `custom.local.output_file` | 否 | runtime 内的返回结果 JSON 文件路径 |
-| `custom.http.url` | http 必填 | HTTP 调用 URL |
-| `custom.http.method` | 否 | 首版仅支持 `POST` |
-| `custom.http.headers` | 否 | HTTP Header |
-| `custom.http.files` | 否 | 声明随 HTTP 请求上传的 workspace 文件集合 |
-| `custom.http.request_body` | 否 | HTTP JSON body 模板 |
+| `engine.name` | yes | Agent name; a built-in match uses the built-in implementation, otherwise `engine.custom` is read |
+| `custom.transport` | yes | Invocation style, `local` or `http` |
+| `custom.timeout_seconds` | no | Engine call timeout; falls back to the case timeout when unset |
+| `custom.response_format` | no | How the result is parsed, default `session_result`; keeping the default is recommended |
+| `custom.env` | no | Custom environment variables; `local` injects them into the process env, `http` does not send them automatically |
+| `custom.kwargs` | no | Custom parameters passed to the custom engine, typed as `dict[str]string` |
+| `custom.local.command` | required for `local` | Executable command inside the runtime |
+| `custom.local.args` | no | Command argument array |
+| `custom.local.cwd` | no | Command working directory; defaults to `${workspace}` |
+| `custom.local.input_file` | no | Input file path inside the runtime; defaults to `${input_file}` |
+| `custom.local.output_file` | no | Result JSON file path inside the runtime |
+| `custom.http.url` | required for `http` | HTTP call URL |
+| `custom.http.method` | no | First version only supports `POST` |
+| `custom.http.headers` | no | HTTP headers |
+| `custom.http.files` | no | Declares the set of workspace files uploaded with the HTTP request |
+| `custom.http.request_body` | no | HTTP JSON body template |
 
-## Transport 一致性原则
+## Transport consistency principle
 
-`local` 和 `http` 是同一个 Custom Engine 契约的两种承载方式。两者应尽量共享同一组输入、输出和安全语义，只在 transport 必需的地方分化：
+`local` and `http` are two carriers of the same Custom Engine contract. They should
+share the same input, output, and security semantics as much as possible, diverging
+only where the transport genuinely requires it:
 
-| 维度 | 统一语义 | local 承载 | http 承载 |
+| Dimension | Unified semantics | local carrier | http carrier |
 | --- | --- | --- | --- |
-| 输入 | `SessionInput` | 写入 `custom.local.input_file` | JSON body；有文件时为 multipart `payload` |
-| 多轮会话 | `messages` 是完整会话历史 | 从 input file 读取 | 从 request body / payload 读取 |
-| 自定义参数 | `custom.kwargs` | 出现在 input file，可模板引用 | 出现在 request body / payload，可模板引用 |
-| 凭据 | `${api_key}` 显式引用，不自动注入 | 通过 `custom.env` 注入 | 通过 `custom.http.headers` 注入 |
-| Workspace 输入 | 显式声明才传递 | agent 直接在 runtime workspace 内执行 | `custom.http.files` 显式上传 |
-| 返回 | `SessionResult` | stdout 或 `output_file` | HTTP response body |
-| 返回解析 | `custom.response_format` | 同左 | 同左 |
-| 产物归档 | `SessionResult.artifacts` 显式声明 | 同左 | 同左 |
+| Input | `SessionInput` | Written to `custom.local.input_file` | JSON body; multipart `payload` when files are present |
+| Multi-turn | `messages` is the complete conversation history | Read from the input file | Read from the request body / payload |
+| Custom params | `custom.kwargs` | Appear in the input file, can be templated | Appear in the request body / payload, can be templated |
+| Credentials | `${api_key}` referenced explicitly, never auto-injected | Injected via `custom.env` | Injected via `custom.http.headers` |
+| Workspace input | Passed only when explicitly declared | Agent runs directly inside the runtime workspace | Uploaded explicitly via `custom.http.files` |
+| Result | `SessionResult` | stdout or `output_file` | HTTP response body |
+| Result parsing | `custom.response_format` | same | same |
+| Artifact archiving | Explicitly declared in `SessionResult.artifacts` | same | same |
 
-不要为某个 transport 引入另一套消息、kwargs、凭据或返回结果模型。新增能力应优先落在统一契约上；只有承载方式确实不同，才放进 `custom.local` 或 `custom.http`。
+Do not introduce a separate message, kwargs, credential, or result model for one
+transport. New capabilities should land on the unified contract first; only put
+something under `custom.local` or `custom.http` when the carrier truly differs.
 
-`session_result` 是主路径。`text` 只适合临时脚本或极简集成：`skill-eval` 会把返回文本当作 `final_message` 构造最小结果，但无法获得完整 transcript、token、产物等结构化信息。
+`session_result` is the main path. `text` is only suitable for throwaway scripts or
+minimal integrations: `skill-eval` treats the returned text as `final_message` and
+builds a minimal result, but cannot obtain a full transcript, token counts,
+structured artifacts, etc.
 
-## API Key
+## API key
 
-Custom Engine 不在 `eval.yaml` 中配置 secret 值。`api_key` 来自 `skill-eval` 现有凭据解析链路，例如 CLI `--api-key`、provider 环境变量、或 `~/.skill-eval/credentials.yaml`。Custom Engine 只通过模板变量 `${api_key}` 引用解析后的 API Key。
+A Custom Engine does not configure secret values in `eval.yaml`. The `api_key` comes
+from `skill-eval`'s existing credential resolution chain — for example the CLI
+`--api-key`, a provider environment variable, or `~/.skill-eval/credentials.yaml`. A
+Custom Engine only references the resolved API key through the template variable
+`${api_key}`.
 
-`${api_key}` 的使用方式由 Custom Engine 配置决定：
+How `${api_key}` is used is decided by the Custom Engine config:
 
-- local transport 可以通过 `custom.env` 显式注入，例如 `OPENAI_API_KEY: ${api_key}`
-- HTTP transport 可以通过 header 显式引用，例如 `Authorization: Bearer ${api_key}`
-- 如果 custom agent 不需要 API Key，可以不引用 `${api_key}`
+- The local transport can inject it explicitly via `custom.env`, e.g.
+  `OPENAI_API_KEY: ${api_key}`.
+- The HTTP transport can reference it explicitly via a header, e.g.
+  `Authorization: Bearer ${api_key}`.
+- If the custom agent does not need an API key, it does not have to reference
+  `${api_key}`.
 
-`api_key` 不应自动注入到所有 custom agent 的环境变量或 HTTP header。自动注入会让不同 provider、不同 agent 的鉴权语义变得不透明，也容易把不该传递的凭据传给下游。
+`api_key` must not be auto-injected into every custom agent's environment variables
+or HTTP headers. Auto-injection makes the auth semantics of different providers and
+agents opaque, and easily leaks credentials that should not be passed downstream.
 
-日志、debug 输出、错误信息和报告中都必须 mask `api_key` 的真实值。
+The real value of `api_key` must be masked in logs, debug output, error messages, and
+reports.
 
-`custom.env` 对不同 transport 的含义不同：local transport 会把它注入到进程环境；HTTP transport 不会把 `custom.env` 自动发送给服务端。HTTP 需要凭据或自定义 header 时，应在 `custom.http.headers` 或 `custom.http.request_body` 中显式引用 `${api_key}` 或 `${VAR}`。
+`custom.env` means different things for different transports: the local transport
+injects it into the process environment; the HTTP transport does not send `custom.env`
+to the server automatically. When the HTTP transport needs credentials or custom
+headers, it should explicitly reference `${api_key}` or `${VAR}` in
+`custom.http.headers` or `custom.http.request_body`.
 
-## 环境变量引用
+## Environment variable references
 
-Custom Engine 配置中的字符串字段支持环境变量引用：
+String fields in the Custom Engine config support environment variable references:
 
 ```yaml
 custom:
@@ -221,21 +269,27 @@ custom:
       Authorization: Bearer ${CUSTOM_AGENT_TOKEN?CUSTOM_AGENT_TOKEN is required}
 ```
 
-支持形式：
+Supported forms:
 
-| 形式 | 语义 |
+| Form | Semantics |
 | --- | --- |
-| `${VAR}` | `VAR` 必须存在且非空，否则配置解析失败 |
-| `${VAR:-default}` | `VAR` 不存在或为空时使用 `default` |
-| `${VAR?message}` | `VAR` 不存在或为空时用 `message` 报错 |
+| `${VAR}` | `VAR` must exist and be non-empty, otherwise config parsing fails |
+| `${VAR:-default}` | Uses `default` when `VAR` is missing or empty |
+| `${VAR?message}` | Reports an error with `message` when `VAR` is missing or empty |
 
-变量替换只作用于 `engine.custom` 内的字符串字段，以及 `engine.model.base_url` / `engine.model.params` 中的字符串值。不得对 case prompt、judge criteria 或整个 YAML 做全局替换，避免误替换用户输入内容。
+Variable substitution applies only to string fields inside `engine.custom`, and to
+string values in `engine.model.base_url` / `engine.model.params`. It must not apply
+globally to the case prompt, judge criteria, or the whole YAML, to avoid accidentally
+substituting user input.
 
-日志输出必须隐藏敏感值。字段名匹配 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`AUTHORIZATION`，或 URL query 中疑似 token 的值，都应 mask。
+Log output must hide sensitive values. Field names matching `KEY`, `TOKEN`, `SECRET`,
+`PASSWORD`, `AUTHORIZATION`, or values in a URL query that look like tokens, should all
+be masked.
 
-## 自定义参数 kwargs
+## Custom parameters: kwargs
 
-`custom.kwargs` 用于传递 agent 自定义参数，类型固定为 `dict[str]string`：
+`custom.kwargs` passes agent-specific custom parameters and is fixed to the type
+`dict[str]string`:
 
 ```yaml
 engine:
@@ -248,14 +302,14 @@ engine:
       report_format: markdown
 ```
 
-`kwargs` 和 `env` 的职责不同：
+`kwargs` and `env` have different responsibilities:
 
-| 字段 | 用途 | 是否适合敏感值 |
+| Field | Purpose | Suitable for sensitive values |
 | --- | --- | --- |
-| `custom.env` | 凭据、Token、运行时环境变量 | 是，但日志必须 mask |
-| `custom.kwargs` | agent 行为参数、开关、业务配置 | 否 |
+| `custom.env` | Credentials, tokens, runtime environment variables | Yes, but logs must mask them |
+| `custom.kwargs` | Agent behavior parameters, switches, business config | No |
 
-`kwargs` 中的值支持环境变量引用：
+Values in `kwargs` support environment variable references:
 
 ```yaml
 custom:
@@ -263,68 +317,87 @@ custom:
     profile: ${CUSTOM_AGENT_PROFILE:-default}
 ```
 
-`kwargs` 解析后会进入 local 输入文件和 HTTP request body，也可以通过模板变量引用。所有 kwargs 值都按字符串处理；如果 agent 需要数字或布尔值，应由 agent 自己解析。
+After resolution, `kwargs` flows into the local input file and the HTTP request body,
+and can also be referenced through template variables. All kwargs values are treated
+as strings; if the agent needs a number or boolean, it must parse it itself.
 
-## Agent 产物归档边界
+## Agent artifact archiving boundary
 
-`skill-eval` 的 Agent 产物归档由 `SessionResult` 返回结果驱动，不由 workspace 扫描、agent 类型或 transport 类型驱动。`skill-eval` 不会因为某个 agent 修改了 workspace、远端目录或本机临时目录，就自动同步这些文件。
+`skill-eval`'s agent artifact archiving is driven by the `SessionResult` return value,
+not by a workspace scan, the agent type, or the transport type. `skill-eval` does not
+auto-sync files just because an agent modified the workspace, a remote directory, or a
+local temp directory.
 
-所有需要进入报告目录的文件，都必须在 `SessionResult.artifacts` 中显式声明：
+Every file that needs to enter the report directory must be explicitly declared in
+`SessionResult.artifacts`:
 
-- 内置 Agent 和 Custom Agent 都遵循同一规则
-- 在 runtime 内执行的 Agent 可以声明 runtime workspace 内的 `path`
-- HTTP 或其他远端 Agent 可以声明可下载的 `url`
-- 任意 Agent 都可以声明小文件的 `content` 或 `content_base64`
+- Built-in agents and Custom Agents follow the same rule.
+- An agent running inside the runtime may declare a `path` inside the runtime
+  workspace.
+- An HTTP or other remote agent may declare a downloadable `url`.
+- Any agent may declare `content` or `content_base64` for small files.
 
-未声明的文件不会被 `skill-eval` 探测、下载或写入报告目录。
+Undeclared files are not detected, downloaded, or written into the report directory by
+`skill-eval`.
 
-HTTP agent 如果需要读取本地 workspace 文件，必须通过 `custom.http.files` 显式声明请求输入文件。这属于请求输入，不属于 workspace 同步；`skill-eval` 只上传声明的文件集合，不会扫描整个 workspace。
+If an HTTP agent needs to read local workspace files, it must explicitly declare the
+request input files via `custom.http.files`. This is request input, not workspace
+sync; `skill-eval` only uploads the declared file set and does not scan the whole
+workspace.
 
-## 内置模板变量
+## Built-in template variables
 
-Custom Engine 配置还支持以下由 `skill-eval` 提供的模板变量：
+The Custom Engine config also supports the following template variables provided by
+`skill-eval`:
 
-| 变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `${workspace}` | 当前 runtime workspace 绝对路径 |
-| `${prompt}` | 当前 case 的单轮 prompt；多轮 case 时为空 |
-| `${messages_json}` | 当前 case 的消息数组 JSON 字符串 |
-| `${messages}` | 当前 case 的消息数组；仅在 JSON body、payload 或输入文件模板中作为结构化值使用 |
-| `${session_input}` | 标准 SessionInput 结构；仅在 JSON body、payload 或输入文件模板中作为结构化值使用 |
-| `${session_input_json}` | 标准 SessionInput JSON 字符串 |
-| `${input_file}` | 建议的 runtime 输入文件路径，默认 `inputs/messages.json` |
-| `${model}` | `provider/name` 形式的模型引用；未配置 `engine.model` 时为空字符串 |
-| `${model_provider}` | `engine.model.provider`；未配置时为空字符串 |
-| `${model_name}` | `engine.model.name`；未配置时为空字符串 |
-| `${api_key}` | 由现有凭据解析链路得到的 API Key；敏感值，日志必须 mask |
-| `${output_file}` | 建议的 runtime 输出文件路径，默认 `outputs/session-result.json` |
-| `${case_id}` | 当前 case ID |
-| `${variant}` | `with_skill` 或 `without_skill` |
-| `${max_turns}` | 当前 case 的最大交互轮数 |
-| `${timeout_seconds}` | 当前 Engine 调用超时时间 |
-| `${kwargs}` | `custom.kwargs` 的结构化对象；仅在 JSON body 或输入文件模板中作为结构化值使用 |
-| `${kwargs_json}` | `custom.kwargs` 的 JSON 字符串 |
-| `${kwargs.<key>}` | 引用单个 kwarg 值，例如 `${kwargs.profile}` |
+| `${workspace}` | Absolute path of the current runtime workspace |
+| `${prompt}` | The current case's single-turn prompt; empty for multi-turn cases |
+| `${messages_json}` | The current case's message array as a JSON string |
+| `${messages}` | The current case's message array; used as a structured value only inside a JSON body, payload, or input-file template |
+| `${session_input}` | The standard SessionInput structure; used as a structured value only inside a JSON body, payload, or input-file template |
+| `${session_input_json}` | The standard SessionInput as a JSON string |
+| `${input_file}` | Suggested runtime input file path, default `inputs/messages.json` |
+| `${output_file}` | Suggested runtime output file path, default `outputs/session-result.json` |
+| `${model}` | Model reference in `provider/name` form; empty string when `engine.model` is unset |
+| `${model_provider}` | `engine.model.provider`; empty string when unset |
+| `${model_name}` | `engine.model.name`; empty string when unset |
+| `${api_key}` | API key resolved by the existing credential chain; sensitive value, must be masked in logs |
+| `${case_id}` | The current case ID |
+| `${variant}` | `with_skill` or `without_skill` |
+| `${max_turns}` | The current case's maximum number of interaction turns |
+| `${timeout_seconds}` | The current Engine call timeout |
+| `${kwargs}` | The structured object of `custom.kwargs`; used as a structured value only inside a JSON body or input-file template |
+| `${kwargs_json}` | `custom.kwargs` as a JSON string |
+| `${kwargs.<key>}` | References a single kwarg value, e.g. `${kwargs.profile}` |
 
-模板变量和环境变量使用同一语法空间。若同名，内置模板变量优先。
+Template variables and environment variables share the same syntax space. When a name
+collides, the built-in template variable takes precedence.
 
-## 多轮会话输入契约
+## Multi-turn conversation input contract
 
-Custom Engine 必须支持统一消息数组作为标准输入形态。`skill-eval` 会把 case input 规范化为 `messages`：
+A Custom Engine must support a unified message array as the standard input form.
+`skill-eval` normalizes the case input into `messages`:
 
 ```json
 [
-  { "role": "user", "content": "先阅读当前目录。" },
-  { "role": "assistant", "content": "已阅读。" },
-  { "role": "user", "content": "现在基于刚才的信息生成报告。" }
+  { "role": "user", "content": "First read the current directory." },
+  { "role": "assistant", "content": "Done." },
+  { "role": "user", "content": "Now generate a report based on what you just learned." }
 ]
 ```
 
-单轮 case 等价于只包含一条 `user` 消息的数组。`prompt` 只是为兼容简单 CLI 暴露的便捷变量；Custom Engine 的主契约应以 `messages` 为准。
+A single-turn case is equivalent to an array containing only one `user` message.
+`prompt` is just a convenience variable exposed for simple CLIs; the primary contract
+of a Custom Engine should be based on `messages`.
 
-### SessionInput 格式
+### SessionInput format
 
-`skill-eval` 会为每次 Agent 调用构造统一的 `SessionInput`。local transport 推荐把它写入 `${input_file}`，HTTP transport 默认把它作为 JSON request body；存在文件上传时，作为 multipart 中的 `payload` 字段。
+`skill-eval` constructs a unified `SessionInput` for each agent invocation. The local
+transport is recommended to write it into `${input_file}`; the HTTP transport uses it
+as the JSON request body by default, or as the multipart `payload` field when file
+uploads are present.
 
 ```json
 {
@@ -337,36 +410,49 @@ Custom Engine 必须支持统一消息数组作为标准输入形态。`skill-ev
     "max_files": "20"
   },
   "messages": [
-    { "role": "user", "content": "先阅读当前目录。" },
-    { "role": "assistant", "content": "已阅读。" },
-    { "role": "user", "content": "现在基于刚才的信息生成报告。" }
+    { "role": "user", "content": "First read the current directory." },
+    { "role": "assistant", "content": "Done." },
+    { "role": "user", "content": "Now generate a report based on what you just learned." }
   ],
   "max_turns": 12,
   "timeout_seconds": 300
 }
 ```
 
-`messages[*].role` 支持 `system`、`user`、`assistant`、`tool`。
+`messages[*].role` supports `system`, `user`, `assistant`, and `tool`.
 
-`content` 首版定义为字符串。后续如果需要多模态或结构化 content，应扩展为 `content_blocks`，而不是改变 `content` 的含义。
+`content` is defined as a string in the first version. If multimodal or structured
+content is needed later, it should be extended as `content_blocks` rather than
+changing the meaning of `content`.
 
-### 会话状态边界
+### Session state boundary
 
-每个 case variant 是一次独立会话。Custom Engine 不应依赖跨 case、跨 variant 或跨 iteration 的隐式远端会话状态。
+Each case variant is an independent session. A Custom Engine must not depend on
+implicit remote session state across cases, variants, or iterations.
 
-如果 Engine 自身支持 session resume，也只能在一次 `Run` 内部使用。返回结果中可以包含完整 transcript，但不要求暴露远端 session ID；如果暴露，应放在 `artifacts.logs` 或后续新增的 metadata 字段中。
+If the Engine itself supports session resume, it may only be used within a single
+`Run`. The result may include the full transcript, but exposing a remote session ID
+is not required; if exposed, it should be placed in `artifacts.logs` or a future
+metadata field.
 
-### 多轮执行语义
+### Multi-turn execution semantics
 
-Custom Engine 收到多条 `messages` 时，应把它们视为同一会话历史，并基于最后一条用户消息继续执行。它不需要逐条回放并在每条用户消息后都调用一次模型；是否压缩上下文、是否真实 replay，由 Engine 自己决定。
+When a Custom Engine receives multiple `messages`, it should treat them as the same
+conversation history and continue from the last user message. It does not need to
+replay each message and call the model after every user message; whether to compress
+context or genuinely replay is the Engine's own decision.
 
-返回的 `transcript` 应至少包含输入消息和最终 assistant 回复。若 Engine 在执行过程中产生工具调用或中间 assistant 消息，应按发生顺序追加到 transcript。
+The returned `transcript` should contain at least the input messages and the final
+assistant reply. If the Engine produces tool calls or intermediate assistant messages
+during execution, they should be appended to the transcript in order of occurrence.
 
-## Local Transport
+## Local transport
 
-`local` transport 通过 `runtime.Exec` 执行命令。命令运行在当前 runtime 中，因此能访问 runtime workspace、已安装的 Skill、fixtures、MCP 配置和环境变量。
+The `local` transport runs a command via `runtime.Exec`. The command runs inside the
+current runtime, so it can access the runtime workspace, installed skills, fixtures,
+MCP config, and environment variables.
 
-示例：
+Example:
 
 ```yaml
 engine:
@@ -402,25 +488,33 @@ engine:
       output_file: ${output_file}
 ```
 
-调用规则：
+Invocation rules:
 
-1. `skill-eval` 在 runtime 内写入 `custom.local.input_file` 指定的路径，内容为上文定义的输入文件 JSON。
-2. `skill-eval` 渲染 `command`、`args`、`cwd`、`env`。
-3. `skill-eval` 使用 shell-safe quoting 组装命令，或直接通过 runtime 支持的 argv 接口执行。
-4. 命令必须在 `timeout_seconds` 内退出。
-5. 若配置 `output_file`，优先从该文件读取返回结果。
-6. 若未配置 `output_file`，从 stdout 读取返回结果。
-7. `custom.response_format: text` 时，将 stdout 作为 `final_message` 构造最小 `SessionResult`。
+1. `skill-eval` writes the path specified by `custom.local.input_file` inside the
+   runtime, with the contents being the input-file JSON defined above.
+2. `skill-eval` renders `command`, `args`, `cwd`, and `env`.
+3. `skill-eval` assembles the command with shell-safe quoting, or executes it directly
+   through an argv interface supported by the runtime.
+4. The command must exit within `timeout_seconds`.
+5. If `output_file` is configured, the result is read from that file first.
+6. If `output_file` is not configured, the result is read from stdout.
+7. With `custom.response_format: text`, stdout is used as `final_message` to build a
+   minimal `SessionResult`.
 
-本地任务的文件修改应发生在 `${workspace}` 下。若这些文件需要进入报告目录，agent 必须在返回结果的 `artifacts` 中显式声明。
+File modifications by a local task should happen under `${workspace}`. If those files
+need to enter the report directory, the agent must explicitly declare them in the
+`artifacts` of the result.
 
-## HTTP Transport
+## HTTP transport
 
-> Phase 1 暂未实现；本节为完整设计。
+> Not yet implemented in Phase 1; this section is the full design.
 
-`http` transport 用于远程 Agent 服务或本机 HTTP Agent 服务。它接收标准 `SessionInput`，执行后通过 `SessionResult` 返回文本、transcript 和产物声明。`skill-eval` 只会下载或写入返回结果中显式声明的产物。
+The `http` transport is used for a remote agent service or a local HTTP agent service.
+It receives the standard `SessionInput`, and after execution returns text, transcript,
+and artifact declarations through `SessionResult`. `skill-eval` only downloads or
+writes artifacts explicitly declared in the result.
 
-示例：
+Example:
 
 ```yaml
 engine:
@@ -451,32 +545,43 @@ engine:
       request_body: ${session_input}
 ```
 
-调用规则：
+Invocation rules:
 
-1. `skill-eval` 渲染 URL、headers 和 request body 中的字符串值。
-2. 未配置 `custom.http.request_body` 时，HTTP request body 默认为 `${session_input}`。
-3. `request_body` 中字段值若完整等于 `${session_input}`、`${messages}` 或 `${kwargs}`，应作为 JSON 结构注入，而不是作为字符串注入。
-4. 若配置 `custom.http.files`，`skill-eval` 从 runtime workspace 展开声明的文件集合，并以 multipart form-data 逐文件上传。
-5. 无文件上传时，请求 body 使用 JSON 编码。
-6. 存在文件上传时，使用 multipart form-data；JSON body 作为 multipart 中的 `payload` 字段。
-7. 非 2xx HTTP 状态视为 Engine 执行错误。
-8. `custom.response_format: session_result` 时，响应 body 必须是 `SessionResult` JSON。
-9. `custom.response_format: text` 时，响应 body 作为 `final_message`。
+1. `skill-eval` renders the string values in the URL, headers, and request body.
+2. When `custom.http.request_body` is not configured, the HTTP request body defaults
+   to `${session_input}`.
+3. If a field value in `request_body` is exactly `${session_input}`, `${messages}`, or
+   `${kwargs}`, it is injected as a JSON structure, not as a string.
+4. If `custom.http.files` is configured, `skill-eval` expands the declared file set
+   from the runtime workspace and uploads each file as multipart form-data.
+5. With no file uploads, the request body is JSON-encoded.
+6. With file uploads, multipart form-data is used; the JSON body becomes the `payload`
+   field of the multipart request.
+7. A non-2xx HTTP status is treated as an Engine execution error.
+8. With `custom.response_format: session_result`, the response body must be
+   `SessionResult` JSON.
+9. With `custom.response_format: text`, the response body is used as `final_message`.
 
-### HTTP 多轮会话
+### HTTP multi-turn conversations
 
-HTTP transport 的多轮会话语义与 local transport 相同：同一次请求中的 `payload.messages` 是完整会话历史，agent 应基于最后一条用户消息继续执行。HTTP transport 不依赖服务端保存跨请求 session 状态。
+The multi-turn semantics of the HTTP transport are the same as the local transport:
+`payload.messages` in a single request is the complete conversation history, and the
+agent should continue from the last user message. The HTTP transport does not rely on
+the server keeping session state across requests.
 
-有文件上传时，multipart 结构为：
+With file uploads, the multipart structure is:
 
-- `payload`: `SessionInput` JSON
-- `files`: 一个或多个文件 part，`filename` 是 workspace 相对路径
+- `payload`: the `SessionInput` JSON
+- `files`: one or more file parts, where `filename` is the workspace-relative path
 
-HTTP transport 和其他 transport 一样，产物归档由返回结果驱动：未在 `artifacts.files` 或兼容字段中声明的文件，不会被 `skill-eval` 探测、同步或下载。
+Like other transports, HTTP artifact archiving is driven by the result: files not
+declared in `artifacts.files` or a compatible field are not detected, synced, or
+downloaded by `skill-eval`.
 
-### HTTP 输入文件
+### HTTP input files
 
-`custom.http.files` 用于把 runtime workspace 中的文件集合作为 HTTP 请求输入传给 agent：
+`custom.http.files` passes a set of files from the runtime workspace to the agent as
+HTTP request input:
 
 ```yaml
 custom:
@@ -492,33 +597,43 @@ custom:
         required: false
 ```
 
-字段说明：
+Field reference:
 
-| 字段 | 必填 | 说明 |
+| Field | Required | Description |
 | --- | --- | --- |
-| `path` | 是 | runtime workspace 内的相对文件路径或 glob pattern |
-| `required` | 否 | 默认 `true`；为 `false` 时文件不存在则跳过 |
+| `path` | yes | A relative file path or glob pattern inside the runtime workspace |
+| `required` | no | Defaults to `true`; when `false`, a missing file is skipped |
 
-约束：
+Constraints:
 
-- `path` 必须是 runtime workspace 内的相对路径，不能是绝对路径，不能包含 `..`
-- `path` 可以是精确文件路径，也可以是 glob pattern
-- 包含 glob 元字符（如 `*`、`?`、`[`、`]`、`**`）时按 glob 展开；否则按精确文件路径处理
-- glob 仅在 runtime workspace 内展开；不跟随结果逃逸到 workspace 外
-- glob 只上传文件；目录本身不会作为单独条目上传
-- `**/*` 表示选择 workspace 下所有匹配文件
-- 每个匹配文件作为独立 multipart file part 上传，并保留其相对 workspace 的路径
-- `required: true` 时，精确文件不存在或 glob 匹配为空应视为配置/输入错误
-- `required: false` 时，精确文件不存在或 glob 匹配为空则跳过该条
-- 文件按原内容上传
-- 未被 `custom.http.files[].path` 显式选中的 workspace 文件不会上传
-- 上传文件只作为 HTTP 请求输入，不会改变产物归档规则
+- `path` must be a relative path inside the runtime workspace; it cannot be absolute
+  and cannot contain `..`.
+- `path` may be an exact file path or a glob pattern.
+- When it contains glob metacharacters (`*`, `?`, `[`, `]`, `**`) it is expanded as a
+  glob; otherwise it is treated as an exact file path.
+- Globs are expanded only inside the runtime workspace; results do not escape the
+  workspace.
+- Globs only upload files; directories themselves are not uploaded as separate
+  entries.
+- `**/*` selects every matching file under the workspace.
+- Each matching file is uploaded as a separate multipart file part, keeping its
+  workspace-relative path.
+- With `required: true`, an exact file that does not exist or a glob that matches
+  nothing is treated as a config/input error.
+- With `required: false`, an exact file that does not exist or a glob that matches
+  nothing causes that entry to be skipped.
+- Files are uploaded with their original content.
+- Workspace files not explicitly selected by `custom.http.files[].path` are not
+  uploaded.
+- Uploaded files are only HTTP request input and do not change the artifact archiving
+  rules.
 
-multipart file part 建议使用固定字段名 `files`，并在每个 part 的 `filename` 中携带 workspace 相对路径，例如 `src/main.go`。
+The multipart file part should use the fixed field name `files`, with each part's
+`filename` carrying the workspace-relative path, e.g. `src/main.go`.
 
-## 返回结果规约
+## Result contract
 
-Custom Engine 的标准返回结果是 `SessionResult` JSON：
+The standard result of a Custom Engine is `SessionResult` JSON:
 
 ```json
 {
@@ -543,32 +658,35 @@ Custom Engine 的标准返回结果是 `SessionResult` JSON：
 }
 ```
 
-### 必填字段
+### Required fields
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 | --- | --- | --- |
-| `exit_code` | integer | Engine 进程或远程任务退出码；成功为 `0` |
-| `final_message` | string | Agent 最终输出文本；允许为空，但不建议 |
+| `exit_code` | integer | Engine process or remote task exit code; `0` on success |
+| `final_message` | string | The agent's final output text; may be empty, but not recommended |
 
-### 可选字段
+### Optional fields
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 | --- | --- | --- |
-| `engine` | string | 返回方标识；未设置时由 `skill-eval` 填为 `engine.name` |
-| `model` | string | 模型引用；未设置时由 `skill-eval` 根据配置填充 |
-| `duration_ms` | integer | Engine 侧耗时；未设置时由 `skill-eval` 用调用耗时填充 |
-| `turns` | integer | Agent 交互轮数 |
-| `input_tokens` | integer | 输入 token 数 |
-| `output_tokens` | integer | 输出 token 数 |
-| `stderr` | string | 错误输出或诊断信息 |
-| `transcript` | array | 统一 transcript |
-| `artifacts` | object | 产物、日志和 workspace diff |
+| `engine` | string | Identifier of the responder; filled by `skill-eval` with `engine.name` when unset |
+| `model` | string | Model reference; filled by `skill-eval` from config when unset |
+| `duration_ms` | integer | Engine-side elapsed time; filled by `skill-eval` with the call duration when unset |
+| `turns` | integer | Number of agent interaction turns |
+| `input_tokens` | integer | Number of input tokens |
+| `output_tokens` | integer | Number of output tokens |
+| `stderr` | string | Error output or diagnostic information |
+| `transcript` | array | Unified transcript |
+| `artifacts` | object | Artifacts, logs, and workspace diff |
 
-### Transcript 规约
+### Transcript contract
 
-`transcript` 使用统一消息结构，`role` 支持 `system`、`user`、`assistant`、`tool`。如果 custom engine 无法提供完整 transcript，至少应返回 `final_message`。`skill-eval` 会用输入消息和 `final_message` 构造最小 transcript。
+`transcript` uses a unified message structure, with `role` supporting `system`,
+`user`, `assistant`, and `tool`. If the custom engine cannot provide a full
+transcript, it should at least return `final_message`. `skill-eval` builds a minimal
+transcript from the input messages and `final_message`.
 
-### Artifacts 规约
+### Artifacts contract
 
 ```json
 {
@@ -583,46 +701,67 @@ Custom Engine 的标准返回结果是 `SessionResult` JSON：
 }
 ```
 
-`generated_files` 是兼容现有报告结构的轻量字段，适合 local transport 返回 runtime workspace 内已存在的文件路径。相对路径以 runtime workspace 为根；local transport 返回绝对路径时必须位于 runtime workspace 或 runtime 可下载产物目录内。
+`generated_files` is a lightweight field compatible with the existing report
+structure, suitable for the local transport returning file paths that already exist
+inside the runtime workspace. Relative paths are rooted at the runtime workspace; when
+the local transport returns an absolute path, it must be inside the runtime workspace.
 
-`artifacts.files` 是 Custom Engine 推荐使用的结构化产物字段：
+`artifacts.files` is the structured artifact field recommended for Custom Engines:
 
-| 字段 | 必填 | 说明 |
+| Field | Required | Description |
 | --- | --- | --- |
-| `name` | 是 | 产物文件名，用于报告目录归档 |
-| `path` | 条件 | runtime workspace 内文件路径，local transport 常用 |
-| `url` | 条件 | 可下载 URL，HTTP transport 常用 |
-| `content` | 条件 | 小文本产物的内联内容 |
-| `content_base64` | 条件 | 二进制产物的 base64 内容 |
-| `content_type` | 否 | MIME type |
+| `name` | yes | Artifact file name, used for archiving into the report directory |
+| `path` | conditional | File path inside the runtime workspace, common for the local transport |
+| `url` | conditional | Downloadable URL, common for the HTTP transport |
+| `content` | conditional | Inline content for a small text artifact |
+| `content_base64` | conditional | base64 content for a binary artifact |
+| `content_type` | no | MIME type |
 
-`path`、`url`、`content`、`content_base64` 必须至少提供一个。非 local transport 不应通过 `generated_files` 或 `files.path` 指向任意 host 文件路径。
+At least one of `path`, `url`, `content`, `content_base64` must be provided. A
+non-local transport must not point `generated_files` or `files.path` at an arbitrary
+host file path.
 
-## 错误处理
+## Error handling
 
-Custom Engine 调用失败分为三类：
+A Custom Engine call failure falls into three categories:
 
-| 类型 | 条件 | 处理 |
+| Category | Condition | Handling |
 | --- | --- | --- |
-| 配置错误 | 缺少必填字段、环境变量未解析、非法 transport | run 前失败 |
-| 调用错误 | local 命令无法启动、HTTP 非 2xx、超时 | case 结果为 `ERROR` |
-| 结果错误 | 返回 JSON 无法解析、缺少 `exit_code`、字段类型错误 | case 结果为 `ERROR` |
+| Config error | Missing required field, unresolved environment variable, invalid transport | Fails before the run |
+| Invocation error | Local command cannot start, non-2xx HTTP, timeout | Case result is `ERROR` |
+| Result error | Returned JSON cannot be parsed, missing `exit_code`, wrong field type | Case result is `ERROR` |
 
-若 Engine 返回合法 `SessionResult` 且 `exit_code != 0`，runner 应保留该 `SessionResult`，并将 case 标记为执行错误。`stderr` 和 `final_message` 应进入报告，便于排查。
+If the Engine returns a valid `SessionResult` with `exit_code != 0`, the runner should
+keep that `SessionResult` and mark the case as an execution error. `stderr` and
+`final_message` should enter the report to aid debugging.
 
-## 安全约束
+## Security constraints
 
-- 不在日志中打印未 mask 的 token、API key、Authorization header。
-- 非 local transport 不应指定任意 host 文件路径作为 generated file；这类产物应使用 `artifacts.files[].url` 或内联内容。
-- local transport 的命令在 runtime 中执行，不直接使用 host `os/exec`。
-- 环境变量解析失败时应在配置阶段报错，避免运行到一半才发现凭据缺失。
+- Do not print unmasked tokens, API keys, or Authorization headers in logs.
+- A non-local transport must not specify an arbitrary host file path as a generated
+  file; such artifacts should use `artifacts.files[].url` or inline content.
+- The local transport's command runs inside the runtime, not directly via the host
+  `os/exec`.
+- Environment variable resolution failure should be reported at the config stage, to
+  avoid discovering missing credentials halfway through a run.
 
-## 实现说明（维护者）
+## Implementation notes (maintainers)
 
-- `internal/config/schema.go` 定义 `CustomEngineConfig`，挂到 `EngineConfig.Custom`。
-- `internal/config/customengine.go` 实现 env 引用解析（`${VAR}` / `${VAR:-default}` / `${VAR?message}`），只作用于 `engine.custom` 配置树及 `engine.model` 字符串值；内置模板变量名保留到运行期解析。
-- `internal/config/validator.go` 先判断 `engine.name` 是否命中内置 Agent；未命中时要求存在 `engine.custom`，并校验 transport 和必填字段。
-- `internal/agent/custom.go` 实现 `CustomAgent`。
-- `internal/agent/factory.go` 优先匹配内置 Agent；未命中且存在 `engine.custom` 时创建 `CustomAgent`；未命中且缺少 custom 配置时报 `unsupported agent "<name>": missing engine.custom`。
-- local transport 复用 `runtime.Exec`，http transport 使用 host 侧 HTTP client。
-- 单测覆盖 env 引用、敏感信息 mask、local stdout JSON、local output file JSON、HTTP JSON、HTTP 非 2xx。
+- `internal/config/schema.go` defines `CustomEngineConfig`, attached to
+  `EngineConfig.Custom`.
+- `internal/config/customengine.go` implements env reference resolution
+  (`${VAR}` / `${VAR:-default}` / `${VAR?message}`), applied only to the
+  `engine.custom` config tree and `engine.model` string values; built-in template
+  variable names are left for run-time resolution.
+- `internal/config/validator.go` first checks whether `engine.name` matches a built-in
+  agent; when it does not, it requires `engine.custom` and validates the transport and
+  required fields.
+- `internal/agent/custom.go` implements `CustomAgent`.
+- `internal/agent/factory.go` matches built-in agents first; when there is no match
+  and `engine.custom` exists, it creates a `CustomAgent`; when there is no match and
+  the custom config is missing, it reports
+  `unsupported agent "<name>": missing engine.custom`.
+- The local transport reuses `runtime.Exec`; the HTTP transport uses a host-side HTTP
+  client.
+- Unit tests cover env references, sensitive-value masking, local stdout JSON, local
+  output-file JSON, HTTP JSON, and non-2xx HTTP.
