@@ -27,6 +27,9 @@ const (
 	customDefaultInputFile     = "inputs/messages.json"
 	customDefaultOutputFile    = "outputs/session-result.json"
 	customSessionResultMissing = "custom engine returned a result without exit_code"
+	// customArtifactReadTimeout bounds the post-timeout artifact read, which
+	// runs on a fresh context detached from the (possibly canceled) run context.
+	customArtifactReadTimeout = 30 * time.Second
 )
 
 // CustomAgent implements Agent for user-defined engines configured via
@@ -195,30 +198,47 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 	// On a timeout/cancel the command may already have emitted a valid result;
 	// still read it so judges and expect checks can inspect the partial answer.
 	var (
-		raw            string
-		usedOutputFile bool
+		raw                string
+		outputFileProduced bool
 	)
 	if execErr == nil || isTimeoutError(execErr) {
-		raw, usedOutputFile = a.readRawResult(ctx, rt, custom, result, outputFile)
+		// After a timeout/cancel, ctx is already done; read artifacts on a
+		// fresh context so a partial output file is still recoverable
+		// (notably for remote runtimes whose DownloadFile honors ctx).
+		readCtx := ctx
+		if execErr != nil {
+			var cancel context.CancelFunc
+			readCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), customArtifactReadTimeout)
+			defer cancel()
+		}
+		raw, outputFileProduced = a.readRawResult(readCtx, rt, custom, result, outputFile)
 	}
 
 	res, parseErr := a.buildResult(ctx, rt, opts, custom, raw, result, durationMs, messages)
 
 	if execErr != nil {
-		if parseErr != nil {
+		switch {
+		case parseErr != nil:
 			// Nothing usable was produced before the failure.
 			res = a.errorResult(result.ExitCode)
 			res.DurationMs = durationMs
 			res.Transcript = minimalCustomTranscript(messages, "")
+		case res.ExitCode == 0:
+			// The run was interrupted; a parsed exit_code 0 must not let the
+			// evaluator treat an interrupted run as a success.
+			res.ExitCode = result.ExitCode
+			if res.ExitCode == 0 {
+				res.ExitCode = 1
+			}
 		}
 		if res.Stderr == "" {
 			res.Stderr = result.Stderr
 		}
-		a.registerFrameworkIO(res, inputFile, outputFile, usedOutputFile)
+		a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced)
 		return res, fmt.Errorf("custom engine run failed: %w", execErr)
 	}
 
-	a.registerFrameworkIO(res, inputFile, outputFile, usedOutputFile)
+	a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced)
 	if parseErr != nil {
 		return res, parseErr
 	}
@@ -282,8 +302,10 @@ func (a *CustomAgent) registerFrameworkIO(res *SessionResult, inputFile, outputF
 // otherwise from stdout. The output file is consulted even when local.output_file
 // is omitted, since a custom engine may write to the default ${output_file}
 // path; a missing default file simply falls back to stdout. The boolean reports
-// whether the result was actually read from the output file.
-func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *config.CustomEngineConfig, result ExecResult, outputFile string) (string, bool) {
+// whether the output file was produced (exists in the runtime) — independent of
+// whether it actually supplied the payload — so an empty produced file is still
+// excluded from workspace diffs.
+func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *config.CustomEngineConfig, result ExecResult, outputFile string) (raw string, produced bool) {
 	if outputFile == "" {
 		return result.Stdout, false
 	}
@@ -308,13 +330,14 @@ func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *con
 		}
 		return result.Stdout, false
 	}
+	// The output file exists in the runtime; it is "produced" even if empty.
 	data, err := os.ReadFile(tmp)
 	if err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
-		return result.Stdout, false
+		return result.Stdout, true
 	}
 	if strings.TrimSpace(string(data)) == "" {
-		return result.Stdout, false
+		return result.Stdout, true
 	}
 	return string(data), true
 }

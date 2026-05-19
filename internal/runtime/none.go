@@ -172,6 +172,9 @@ func (r *NoneRuntime) Exec(ctx context.Context, command string, opts ExecOptions
 	startTime := time.Now()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// Run in a dedicated process group and kill the whole group on
+	// cancellation, so a timed-out command's descendants do not outlive it.
+	configureProcessGroup(cmd)
 	// WaitDelay bounds how long Wait blocks after the context is cancelled:
 	// without it, a killed command whose grandchildren still hold the stdout
 	// pipe (e.g. a backgrounded `sleep`) makes Exec hang until those children

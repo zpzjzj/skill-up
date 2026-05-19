@@ -329,26 +329,33 @@ func TestCustomAgent_RunLocal_PathArtifactPreservesName(t *testing.T) {
 	}
 }
 
-func TestCustomAgent_RunLocal_RegistersFrameworkInputFile(t *testing.T) {
-	t.Parallel()
+// assertCustomGeneratedFile runs a local custom agent with the given shell
+// args and asserts that a file with wantBasename is registered in
+// GeneratedFiles (so it is excluded from workspace diffs).
+func assertCustomGeneratedFile(t *testing.T, scriptArgs []string, wantBasename string) {
+	t.Helper()
 	rt := newCustomTestRuntime(t)
 	ag := customLocalAgent(&config.CustomEngineConfig{
 		Transport: "local",
-		Local: &config.CustomLocalConfig{
-			Command: "sh",
-			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"ok"}'`},
-		},
+		Local:     &config.CustomLocalConfig{Command: "sh", Args: scriptArgs},
 	})
 
 	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	if !containsBasename(res.Artifacts.GeneratedFiles, wantBasename) {
+		t.Fatalf("generated_files = %v, want %s registered", res.Artifacts.GeneratedFiles, wantBasename)
+	}
+}
+
+func TestCustomAgent_RunLocal_RegistersFrameworkInputFile(t *testing.T) {
+	t.Parallel()
 	// The framework-written input file must be registered so it is excluded
 	// from workspace diffs.
-	if !containsBasename(res.Artifacts.GeneratedFiles, "messages.json") {
-		t.Fatalf("generated_files = %v, want the framework input file registered", res.Artifacts.GeneratedFiles)
-	}
+	assertCustomGeneratedFile(t,
+		[]string{"-c", `echo '{"exit_code":0,"final_message":"ok"}'`},
+		"messages.json")
 }
 
 func TestCustomAgent_RunLocal_PartialResultOnTimeout(t *testing.T) {
@@ -371,6 +378,21 @@ func TestCustomAgent_RunLocal_PartialResultOnTimeout(t *testing.T) {
 	if res == nil || res.FinalMessage != "partial answer" {
 		t.Fatalf("res = %#v, want the partial result preserved", res)
 	}
+	// An interrupted run must not report exit_code 0 even though the partial
+	// JSON did, or the evaluator could treat it as a clean success.
+	if res.ExitCode == 0 {
+		t.Fatalf("res.ExitCode = 0, want a non-zero code for an interrupted run")
+	}
+}
+
+func TestCustomAgent_RunLocal_RegistersEmptyOutputFile(t *testing.T) {
+	t.Parallel()
+	// The engine creates the default output file but leaves it empty and
+	// returns the result on stdout; the produced file must still be
+	// registered for diff exclusion.
+	assertCustomGeneratedFile(t,
+		[]string{"-c", `mkdir -p outputs && : > outputs/session-result.json && echo '{"exit_code":0,"final_message":"ok"}'`},
+		"session-result.json")
 }
 
 func TestCustomAgent_RunLocal_RendersTemplatedKwargs(t *testing.T) {

@@ -220,6 +220,32 @@ func TestNoneRuntime_ExecReturnsContextErrorOnTimeout(t *testing.T) {
 	}
 }
 
+func TestNoneRuntime_ExecKillsDescendantsOnTimeout(t *testing.T) {
+	t.Parallel()
+
+	rt := &NoneRuntime{}
+	if err := rt.Create(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rt.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// A backgrounded descendant tries to write a marker 3s in; if the process
+	// group is killed on timeout it never runs.
+	_, err := rt.Exec(ctx, "(sleep 3 && touch leaked.txt) & sleep 10", ExecOptions{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+
+	// Wait past the descendant's would-be write time.
+	time.Sleep(4 * time.Second)
+	if _, statErr := os.Stat(filepath.Join(rt.Workspace(), "leaked.txt")); statErr == nil {
+		t.Fatal("descendant process survived the timeout and wrote leaked.txt")
+	}
+}
+
 func TestNoneRuntime_ExecAddsSpanCommandAttrs(t *testing.T) {
 	rt := &NoneRuntime{}
 	if err := rt.Create(context.Background()); err != nil {
