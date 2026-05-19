@@ -205,6 +205,37 @@ func TestResolveCustomEngineConfig_RejectsAPIKeyTemplateInCommand(t *testing.T) 
 	}
 }
 
+func TestResolveCustomEngineConfig_RejectsAggregateKwargsInCommand(t *testing.T) {
+	for _, ref := range []string{"${kwargs}", "${kwargs_json}", "${session_input}", "${session_input_json}"} {
+		cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+			Transport: "local",
+			Local: &CustomLocalConfig{
+				Command: "/opt/agent",
+				Args:    []string{"--config", ref},
+			},
+		})
+		err := ResolveCustomEngineConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "custom.env") {
+			t.Errorf("%s in args: error = %v, want it rejected", ref, err)
+		}
+	}
+}
+
+func TestResolveCustomEngineConfig_RejectsSecretInOutputFile(t *testing.T) {
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local: &CustomLocalConfig{
+			Command:    "/opt/agent",
+			OutputFile: "out-${api_key}.json",
+		},
+	})
+
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want a secret reference in output_file rejected", err)
+	}
+}
+
 func TestResolveCustomEngineConfig_AllowsNonSecretKwargInCommand(t *testing.T) {
 	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
 		Transport: "local",

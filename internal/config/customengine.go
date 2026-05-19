@@ -20,11 +20,14 @@ func isSensitiveEnvName(name string) bool {
 	return sensitiveEnvNamePattern.MatchString(name)
 }
 
-// isSensitiveTemplateVar reports whether a built-in template variable carries a
-// credential: ${api_key}, or a ${kwargs.<key>} whose key name looks secret-like.
-// Such variables must not be rendered into a command line.
+// isSensitiveTemplateVar reports whether a built-in template variable may carry
+// a credential and so must not be rendered into a command line: ${api_key}; a
+// ${kwargs.<key>} whose key name looks secret-like; or an aggregate variable
+// (${kwargs}, ${kwargs_json}, ${session_input}, ${session_input_json}) that
+// embeds the whole kwargs map and could therefore contain secret-like keys.
 func isSensitiveTemplateVar(name string) bool {
-	if name == "api_key" {
+	switch name {
+	case "api_key", "kwargs", "kwargs_json", "session_input", "session_input_json":
 		return true
 	}
 	if key, ok := strings.CutPrefix(name, "kwargs."); ok {
@@ -95,75 +98,90 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	}
 
 	var errs []string
-	resolve := func(field string, target *string) {
-		v, err := resolveEnvRefs(*target)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("engine.custom.%s: %s", field, err))
-			return
-		}
-		*target = v
-	}
-	resolveMap := func(field string, m map[string]string) {
-		for k, v := range m {
-			rv, err := resolveEnvRefs(v)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("engine.custom.%s.%s: %s", field, k, err))
-				continue
-			}
-			m[k] = rv
-		}
-	}
-
-	resolve("transport", &custom.Transport)
-	resolve("response_format", &custom.ResponseFormat)
-	resolveMap("env", custom.Env)
-	resolveMap("kwargs", custom.Kwargs)
-
+	errs = append(errs, resolveScalarEnv("transport", &custom.Transport, false)...)
+	errs = append(errs, resolveScalarEnv("response_format", &custom.ResponseFormat, false)...)
+	errs = append(errs, resolveStringMapEnv("env", custom.Env)...)
+	errs = append(errs, resolveStringMapEnv("kwargs", custom.Kwargs)...)
 	if custom.Local != nil {
-		l := custom.Local
-		// command and args become a command line, so they reject secret-like
-		// env references; other local fields use the standard resolver.
-		if v, err := resolveEnvRefsStrict(l.Command); err != nil {
-			errs = append(errs, fmt.Sprintf("engine.custom.local.command: %s", err))
-		} else {
-			l.Command = v
-		}
-		resolve("local.cwd", &l.Cwd)
-		resolve("local.input_file", &l.InputFile)
-		resolve("local.output_file", &l.OutputFile)
-		for i := range l.Args {
-			rv, err := resolveEnvRefsStrict(l.Args[i])
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("engine.custom.local.args[%d]: %s", i, err))
-				continue
-			}
-			l.Args[i] = rv
-		}
+		errs = append(errs, resolveLocalEnv(custom.Local)...)
 	}
-
 	if custom.HTTP != nil {
-		h := custom.HTTP
-		resolve("http.url", &h.URL)
-		resolve("http.method", &h.Method)
-		resolveMap("http.headers", h.Headers)
-		for i := range h.Files {
-			rv, err := resolveEnvRefs(h.Files[i].Path)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("engine.custom.http.files[%d].path: %s", i, err))
-				continue
-			}
-			h.Files[i].Path = rv
-		}
-		if rb, err := resolveEnvRefsInAny(h.RequestBody); err != nil {
-			errs = append(errs, fmt.Sprintf("engine.custom.http.request_body: %s", err))
-		} else if m, ok := rb.(map[string]any); ok {
-			h.RequestBody = m
-		}
+		errs = append(errs, resolveHTTPEnv(custom.HTTP)...)
 	}
-
 	errs = append(errs, resolveModelEnv(&cfg.Engine.Model)...)
 
 	return aggregateConfigErrors(errs)
+}
+
+// resolveScalarEnv resolves a single string field. When strict, it additionally
+// rejects secret-like references (for fields that become a command line).
+func resolveScalarEnv(field string, target *string, strict bool) []string {
+	resolveFn := resolveEnvRefs
+	if strict {
+		resolveFn = resolveEnvRefsStrict
+	}
+	v, err := resolveFn(*target)
+	if err != nil {
+		return []string{fmt.Sprintf("engine.custom.%s: %s", field, err)}
+	}
+	*target = v
+	return nil
+}
+
+// resolveStringMapEnv resolves every value of a string map in place.
+func resolveStringMapEnv(field string, m map[string]string) []string {
+	var errs []string
+	for k, v := range m {
+		rv, err := resolveEnvRefs(v)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("engine.custom.%s.%s: %s", field, k, err))
+			continue
+		}
+		m[k] = rv
+	}
+	return errs
+}
+
+// resolveLocalEnv resolves the engine.custom.local fields. command, args, cwd
+// and the I/O paths all become (or are logged as part of) a command line, so
+// they reject secret-like references.
+func resolveLocalEnv(l *CustomLocalConfig) []string {
+	var errs []string
+	errs = append(errs, resolveScalarEnv("local.command", &l.Command, true)...)
+	errs = append(errs, resolveScalarEnv("local.cwd", &l.Cwd, true)...)
+	errs = append(errs, resolveScalarEnv("local.input_file", &l.InputFile, true)...)
+	errs = append(errs, resolveScalarEnv("local.output_file", &l.OutputFile, true)...)
+	for i := range l.Args {
+		rv, err := resolveEnvRefsStrict(l.Args[i])
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("engine.custom.local.args[%d]: %s", i, err))
+			continue
+		}
+		l.Args[i] = rv
+	}
+	return errs
+}
+
+// resolveHTTPEnv resolves the engine.custom.http fields.
+func resolveHTTPEnv(h *CustomHTTPConfig) []string {
+	var errs []string
+	errs = append(errs, resolveScalarEnv("http.url", &h.URL, false)...)
+	errs = append(errs, resolveScalarEnv("http.method", &h.Method, false)...)
+	errs = append(errs, resolveStringMapEnv("http.headers", h.Headers)...)
+	for i := range h.Files {
+		rv, err := resolveEnvRefs(h.Files[i].Path)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("engine.custom.http.files[%d].path: %s", i, err))
+			continue
+		}
+		h.Files[i].Path = rv
+	}
+	if rb, err := resolveEnvRefsInAny(h.RequestBody); err != nil {
+		errs = append(errs, fmt.Sprintf("engine.custom.http.request_body: %s", err))
+	} else if m, ok := rb.(map[string]any); ok {
+		h.RequestBody = m
+	}
+	return errs
 }
 
 // resolveModelEnv resolves env references in engine.model string values.

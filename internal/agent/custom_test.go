@@ -214,6 +214,61 @@ func TestCustomAgent_RunLocal_IgnoresStaleOutputFile(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_KwargsInOutputFilePath(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// output_file references a kwarg; kwargs must be resolved before the I/O
+	// path templates so ${kwargs.profile} expands rather than vanishing.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Kwargs:    map[string]string{"profile": "rep"},
+		Local: &config.CustomLocalConfig{
+			Command:    "sh",
+			OutputFile: "outputs/${kwargs.profile}.json",
+			Args:       []string{"-c", `mkdir -p "$(dirname '${output_file}')" && echo '{"exit_code":0,"final_message":"kwarg-path"}' > '${output_file}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "kwarg-path" {
+		t.Fatalf("final_message = %q, want kwarg-path (kwargs must resolve in output_file)", res.FinalMessage)
+	}
+}
+
+func TestCustomAgent_RunLocal_ClearedStaleOutputRegistered(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// A fixture pre-creates the default output file; the command returns its
+	// result on stdout and never recreates it.
+	stale := filepath.Join(rt.Workspace(), "outputs", "session-result.json")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"exit_code":0,"final_message":"STALE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"fresh"}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The framework deleted the stale file; that path must still be registered
+	// so the deletion is excluded from workspace diffs.
+	if !containsBasename(res.Artifacts.GeneratedFiles, "session-result.json") {
+		t.Fatalf("generated_files = %v, want the cleared output path registered", res.Artifacts.GeneratedFiles)
+	}
+}
+
 func TestCustomAgent_RunLocal_TextIgnoresOutputFile(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)

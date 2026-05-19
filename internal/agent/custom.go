@@ -27,6 +27,9 @@ const (
 	customDefaultInputFile     = "inputs/messages.json"
 	customDefaultOutputFile    = "outputs/session-result.json"
 	customSessionResultMissing = "custom engine returned a result without exit_code"
+	// customStaleClearedMarker is printed by the pre-run cleanup when it
+	// actually deletes a stale output file.
+	customStaleClearedMarker = "__skill_up_stale_output_cleared__"
 	// customArtifactReadTimeout bounds the post-timeout artifact read, which
 	// runs on a fresh context detached from the (possibly canceled) run context.
 	customArtifactReadTimeout = 30 * time.Second
@@ -96,16 +99,10 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 		timeoutSec = opts.TimeoutSec
 	}
 
-	// Build template variables in stages so per-case kwargs can themselves use
-	// built-in template variables (e.g. ${case_id}): resolve I/O paths, render
-	// kwargs against the base variables, then assemble the full variable set.
+	// Build the full template variable set first: kwargs may reference
+	// built-in variables (e.g. ${case_id}), and the I/O path templates may in
+	// turn reference ${kwargs.<key>}, so kwargs must be resolved before paths.
 	baseVars := a.buildBaseVars(rt, opts, messages, timeoutSec)
-
-	inputFile, outputFile, err := resolveCustomIOFiles(rt, custom, baseVars)
-	if err != nil {
-		return a.errorResult(0), err
-	}
-	baseVars["input_file"], baseVars["output_file"] = inputFile, outputFile
 
 	renderedKwargs, err := renderTemplateMap(custom.Kwargs, baseVars)
 	if err != nil {
@@ -118,6 +115,14 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 		return a.errorResult(0), err
 	}
 
+	// Resolve the I/O paths with the full variable set (so they may use
+	// ${kwargs.<key>}), then expose the resolved paths to command rendering.
+	inputFile, outputFile, err := resolveCustomIOFiles(rt, custom, vars)
+	if err != nil {
+		return a.errorResult(0), err
+	}
+	vars["input_file"], vars["output_file"] = inputFile, outputFile
+
 	sessJSON, err := json.Marshal(sess)
 	if err != nil {
 		return a.errorResult(0), fmt.Errorf("marshal session input: %w", err)
@@ -128,9 +133,7 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 
 	// Remove any stale output file so a result left by a fixture or a previous
 	// run is never mistaken for this invocation's output.
-	if _, err := rt.Exec(ctx, "rm -f -- "+shellQuote(outputFile), ExecOptions{}); err != nil {
-		logging.DebugContextf(ctx, "CustomAgent: could not clear stale output file %s: %v", outputFile, err)
-	}
+	clearedStaleOutput := a.clearStaleOutputFile(ctx, rt, outputFile)
 
 	cmd, execOpts, err := a.buildLocalExec(ctx, rt, opts, custom, vars, timeoutSec)
 	if err != nil {
@@ -147,7 +150,22 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 	}
 
 	result, execErr := rt.Exec(execCtx, cmd, execOpts)
-	return a.finishLocal(ctx, rt, opts, custom, result, execErr, inputFile, outputFile, start, messages)
+	return a.finishLocal(ctx, rt, opts, custom, result, execErr, inputFile, outputFile, clearedStaleOutput, start, messages)
+}
+
+// clearStaleOutputFile removes a pre-existing output file before the run and
+// reports whether one was actually deleted, so a fixture/previous-run file is
+// not parsed as this invocation's result and the deletion can be excluded from
+// workspace diffs.
+func (a *CustomAgent) clearStaleOutputFile(ctx context.Context, rt Runtime, outputFile string) bool {
+	q := shellQuote(outputFile)
+	cmd := "if [ -e " + q + " ]; then rm -f -- " + q + " && printf %s " + shellQuote(customStaleClearedMarker) + "; fi"
+	result, err := rt.Exec(ctx, cmd, ExecOptions{})
+	if err != nil {
+		logging.DebugContextf(ctx, "CustomAgent: could not clear stale output file %s: %v", outputFile, err)
+		return false
+	}
+	return strings.Contains(result.Stdout, customStaleClearedMarker)
 }
 
 // buildLocalExec renders the command, args and exec options for the local run.
@@ -195,7 +213,7 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 }
 
 // finishLocal turns a runtime exec result into a SessionResult.
-func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, inputFile, outputFile string, start time.Time, messages []transcript.Message) (*SessionResult, error) {
+func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, inputFile, outputFile string, clearedStaleOutput bool, start time.Time, messages []transcript.Message) (*SessionResult, error) {
 	durationMs := time.Since(start).Milliseconds()
 
 	// On a timeout/cancel the command may already have emitted a valid result;
@@ -237,11 +255,11 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 		if res.Stderr == "" {
 			res.Stderr = result.Stderr
 		}
-		a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced)
+		a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced || clearedStaleOutput)
 		return res, fmt.Errorf("custom engine run failed: %w", execErr)
 	}
 
-	a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced)
+	a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced || clearedStaleOutput)
 	// A non-zero process exit is a failed run even when the engine's JSON
 	// reports exit_code 0 (e.g. a wrapper that crashed after printing output)
 	// or never emitted parseable JSON at all. Reflect the real process
