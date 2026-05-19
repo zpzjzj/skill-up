@@ -175,10 +175,7 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 		// Resolve a relative cwd against the runtime workspace so local
 		// transport behaves consistently across runtimes (NoneRuntime would
 		// otherwise pass it through relative to the skill-up process).
-		cwd = rendered
-		if !filepath.IsAbs(cwd) {
-			cwd = filepath.Join(rt.Workspace(), cwd)
-		}
+		cwd = workspacePath(rt, rendered)
 	}
 
 	envVars, err := renderTemplateMap(custom.Env, vars)
@@ -610,20 +607,35 @@ func (a *CustomAgent) completeTemplateVars(baseVars, renderedKwargs map[string]s
 }
 
 // resolveCustomIOFiles renders the input/output file paths, applying defaults.
+// A non-absolute configured path is resolved against the runtime workspace so
+// it is consistent regardless of local.cwd (the command sees the same path the
+// runtime upload/download APIs key on).
 func resolveCustomIOFiles(rt Runtime, custom *config.CustomEngineConfig, vars map[string]string) (inputFile, outputFile string, err error) {
 	inputFile = filepath.Join(rt.Workspace(), customDefaultInputFile)
 	if custom.Local.InputFile != "" {
-		if inputFile, err = renderTemplate(custom.Local.InputFile, vars); err != nil {
-			return "", "", fmt.Errorf("render local.input_file: %w", err)
+		rendered, rErr := renderTemplate(custom.Local.InputFile, vars)
+		if rErr != nil {
+			return "", "", fmt.Errorf("render local.input_file: %w", rErr)
 		}
+		inputFile = workspacePath(rt, rendered)
 	}
 	outputFile = filepath.Join(rt.Workspace(), customDefaultOutputFile)
 	if custom.Local.OutputFile != "" {
-		if outputFile, err = renderTemplate(custom.Local.OutputFile, vars); err != nil {
-			return "", "", fmt.Errorf("render local.output_file: %w", err)
+		rendered, rErr := renderTemplate(custom.Local.OutputFile, vars)
+		if rErr != nil {
+			return "", "", fmt.Errorf("render local.output_file: %w", rErr)
 		}
+		outputFile = workspacePath(rt, rendered)
 	}
 	return inputFile, outputFile, nil
+}
+
+// workspacePath resolves a non-absolute path against the runtime workspace.
+func workspacePath(rt Runtime, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(rt.Workspace(), p)
 }
 
 func customResponseFormat(custom *config.CustomEngineConfig) string {

@@ -138,6 +138,30 @@ func TestCustomAgent_InstallMCP_NoopWithServers(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_RelativeOutputFileWithCwd(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// A relative output_file combined with a non-default cwd must still be
+	// resolved against the workspace, so readRawResult finds the file.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command:    "sh",
+			Cwd:        "inputs",
+			OutputFile: "result.json",
+			Args:       []string{"-c", `echo '{"exit_code":0,"final_message":"rel-file"}' > '${output_file}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "rel-file" {
+		t.Fatalf("final_message = %q, want rel-file (result read from the relative output file)", res.FinalMessage)
+	}
+}
+
 func TestCustomAgent_RunLocal_TextFormat(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
