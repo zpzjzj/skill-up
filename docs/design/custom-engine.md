@@ -7,7 +7,7 @@
 > today is rejected by validation with a clear "not yet implemented" error.
 
 This document defines the Custom Engine configuration interface and result contract
-for `skill-eval`. A Custom Engine is used to integrate agent executors that are not
+for `skill-up`. A Custom Engine is used to integrate agent executors that are not
 built in — for example a local CLI, a script, an internal scheduled job, or a remote
 HTTP agent service.
 
@@ -26,7 +26,7 @@ HTTP agent service.
 
 - No compatibility with the old single-field `engine.entry` config.
 - When `engine.name` matches a built-in agent, `engine.custom` is not read.
-- `skill-eval` provides no implicit file-sync behavior for any agent. Whether it is a
+- `skill-up` provides no implicit file-sync behavior for any agent. Whether it is a
   built-in agent, a Custom Agent, or a Custom Engine's `local` / `http` transport,
   only artifacts explicitly declared in the result are downloaded or written into the
   local report directory.
@@ -38,8 +38,8 @@ needs to be filled in when the custom agent references model information through
 template variables.
 
 When `engine.name` matches a built-in agent (for example `claude_code`, `codex`,
-`qodercli`), `skill-eval` uses the built-in implementation. When `engine.name` does
-not match a built-in agent, `engine.custom` must be provided, and `skill-eval`
+`qodercli`), `skill-up` uses the built-in implementation. When `engine.name` does
+not match a built-in agent, `engine.custom` must be provided, and `skill-up`
 creates the agent from the Custom Engine config.
 
 ```yaml
@@ -127,7 +127,7 @@ Before completing an integration, confirm each item:
 - It returns a parseable `SessionResult` for both success and failure.
 - It returns at least `exit_code` and `final_message`.
 - Every file that needs to be archived is written into `SessionResult.artifacts`,
-  not relying on `skill-eval` to auto-scan.
+  not relying on `skill-up` to auto-scan.
 - It does not require secrets to be written into `eval.yaml`; the API key is
   referenced through `${api_key}` after credential resolution.
 - It does not depend on implicit session state across cases, variants, or iterations.
@@ -221,15 +221,15 @@ transport. New capabilities should land on the unified contract first; only put
 something under `custom.local` or `custom.http` when the carrier truly differs.
 
 `session_result` is the main path. `text` is only suitable for throwaway scripts or
-minimal integrations: `skill-eval` treats the returned text as `final_message` and
+minimal integrations: `skill-up` treats the returned text as `final_message` and
 builds a minimal result, but cannot obtain a full transcript, token counts,
 structured artifacts, etc.
 
 ## API key
 
 A Custom Engine does not configure secret values in `eval.yaml`. The `api_key` comes
-from `skill-eval`'s existing credential resolution chain — for example the CLI
-`--api-key`, a provider environment variable, or `~/.skill-eval/credentials.yaml`. A
+from `skill-up`'s existing credential resolution chain — for example the CLI
+`--api-key`, a provider environment variable, or `~/.skill-up/credentials.yaml`. A
 Custom Engine only references the resolved API key through the template variable
 `${api_key}`.
 
@@ -327,8 +327,8 @@ as strings; if the agent needs a number or boolean, it must parse it itself.
 
 ## Agent artifact archiving boundary
 
-`skill-eval`'s agent artifact archiving is driven by the `SessionResult` return value,
-not by a workspace scan, the agent type, or the transport type. `skill-eval` does not
+`skill-up`'s agent artifact archiving is driven by the `SessionResult` return value,
+not by a workspace scan, the agent type, or the transport type. `skill-up` does not
 auto-sync files just because an agent modified the workspace, a remote directory, or a
 local temp directory.
 
@@ -342,17 +342,17 @@ Every file that needs to enter the report directory must be explicitly declared 
 - Any agent may declare `content` or `content_base64` for small files.
 
 Undeclared files are not detected, downloaded, or written into the report directory by
-`skill-eval`.
+`skill-up`.
 
 If an HTTP agent needs to read local workspace files, it must explicitly declare the
 request input files via `custom.http.files`. This is request input, not workspace
-sync; `skill-eval` only uploads the declared file set and does not scan the whole
+sync; `skill-up` only uploads the declared file set and does not scan the whole
 workspace.
 
 ## Built-in template variables
 
 The Custom Engine config also supports the following template variables provided by
-`skill-eval`:
+`skill-up`:
 
 | Variable | Description |
 | --- | --- |
@@ -382,7 +382,7 @@ collides, the built-in template variable takes precedence.
 ## Multi-turn conversation input contract
 
 A Custom Engine must support a unified message array as the standard input form.
-`skill-eval` normalizes the case input into `messages`:
+`skill-up` normalizes the case input into `messages`:
 
 ```json
 [
@@ -398,7 +398,7 @@ of a Custom Engine should be based on `messages`.
 
 ### SessionInput format
 
-`skill-eval` constructs a unified `SessionInput` for each agent invocation. The local
+`skill-up` constructs a unified `SessionInput` for each agent invocation. The local
 transport is recommended to write it into `${input_file}`; the HTTP transport uses it
 as the JSON request body by default, or as the multipart `payload` field when file
 uploads are present.
@@ -407,7 +407,7 @@ uploads are present.
 {
   "case_id": "multi-turn-report",
   "variant": "with_skill",
-  "workspace": "/tmp/skill-eval/workspace",
+  "workspace": "/tmp/skill-up/workspace",
   "model": "openai/gpt-4.1",
   "kwargs": {
     "profile": "strict",
@@ -494,10 +494,10 @@ engine:
 
 Invocation rules:
 
-1. `skill-eval` writes the path specified by `custom.local.input_file` inside the
+1. `skill-up` writes the path specified by `custom.local.input_file` inside the
    runtime, with the contents being the input-file JSON defined above.
-2. `skill-eval` renders `command`, `args`, `cwd`, and `env`.
-3. `skill-eval` assembles the command with shell-safe quoting, or executes it directly
+2. `skill-up` renders `command`, `args`, `cwd`, and `env`.
+3. `skill-up` assembles the command with shell-safe quoting, or executes it directly
    through an argv interface supported by the runtime.
 4. The command must exit within `timeout_seconds`.
 5. If `output_file` is configured, the result is read from that file first.
@@ -515,7 +515,7 @@ need to enter the report directory, the agent must explicitly declare them in th
 
 The `http` transport is used for a remote agent service or a local HTTP agent service.
 It receives the standard `SessionInput`, and after execution returns text, transcript,
-and artifact declarations through `SessionResult`. `skill-eval` only downloads or
+and artifact declarations through `SessionResult`. `skill-up` only downloads or
 writes artifacts explicitly declared in the result.
 
 Example:
@@ -551,12 +551,12 @@ engine:
 
 Invocation rules:
 
-1. `skill-eval` renders the string values in the URL, headers, and request body.
+1. `skill-up` renders the string values in the URL, headers, and request body.
 2. When `custom.http.request_body` is not configured, the HTTP request body defaults
    to `${session_input}`.
 3. If a field value in `request_body` is exactly `${session_input}`, `${messages}`, or
    `${kwargs}`, it is injected as a JSON structure, not as a string.
-4. If `custom.http.files` is configured, `skill-eval` expands the declared file set
+4. If `custom.http.files` is configured, `skill-up` expands the declared file set
    from the runtime workspace and uploads each file as multipart form-data.
 5. With no file uploads, the request body is JSON-encoded.
 6. With file uploads, multipart form-data is used; the JSON body becomes the `payload`
@@ -580,7 +580,7 @@ With file uploads, the multipart structure is:
 
 Like other transports, HTTP artifact archiving is driven by the result: files not
 declared in `artifacts.files` or a compatible field are not detected, synced, or
-downloaded by `skill-eval`.
+downloaded by `skill-up`.
 
 ### HTTP input files
 
@@ -673,9 +673,9 @@ The standard result of a Custom Engine is `SessionResult` JSON:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `engine` | string | Identifier of the responder; filled by `skill-eval` with `engine.name` when unset |
-| `model` | string | Model reference; filled by `skill-eval` from config when unset |
-| `duration_ms` | integer | Engine-side elapsed time; filled by `skill-eval` with the call duration when unset |
+| `engine` | string | Identifier of the responder; filled by `skill-up` with `engine.name` when unset |
+| `model` | string | Model reference; filled by `skill-up` from config when unset |
+| `duration_ms` | integer | Engine-side elapsed time; filled by `skill-up` with the call duration when unset |
 | `turns` | integer | Number of agent interaction turns |
 | `input_tokens` | integer | Number of input tokens |
 | `output_tokens` | integer | Number of output tokens |
@@ -687,7 +687,7 @@ The standard result of a Custom Engine is `SessionResult` JSON:
 
 `transcript` uses a unified message structure, with `role` supporting `system`,
 `user`, `assistant`, and `tool`. If the custom engine cannot provide a full
-transcript, it should at least return `final_message`. `skill-eval` builds a minimal
+transcript, it should at least return `final_message`. `skill-up` builds a minimal
 transcript from the input messages and `final_message`.
 
 ### Artifacts contract

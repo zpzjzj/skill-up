@@ -46,7 +46,7 @@ func NewCustomAgent(cfg Config) *CustomAgent {
 }
 
 // Install is a no-op: a custom engine's command is provided and managed by the
-// user, not installed by skill-eval.
+// user, not installed by skill-up.
 func (a *CustomAgent) Install(_ context.Context, _ Runtime) error { return nil }
 
 // InstallMCP is a no-op for custom engines: a custom engine discovers MCP
@@ -64,7 +64,7 @@ func (a *CustomAgent) InstallMCP(ctx context.Context, _ Runtime, mcpCfg runtime.
 func (a *CustomAgent) Check(_ context.Context, _ Runtime) error { return nil }
 
 // CheckCredentials is a no-op: a custom engine references credentials
-// explicitly via ${api_key}, so skill-eval does not pre-validate them.
+// explicitly via ${api_key}, so skill-up does not pre-validate them.
 func (a *CustomAgent) CheckCredentials(_ context.Context) error { return nil }
 
 // Run executes the custom engine for a single case.

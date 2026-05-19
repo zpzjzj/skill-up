@@ -21,7 +21,7 @@ func isSensitiveEnvName(name string) bool {
 }
 
 // builtinTemplateVars is the set of run-time template variable names provided
-// by skill-eval. References to these are left intact during config-time env
+// by skill-up. References to these are left intact during config-time env
 // resolution and resolved later when a custom engine runs a case.
 var builtinTemplateVars = map[string]struct{}{
 	"workspace":          {},
@@ -44,7 +44,7 @@ var builtinTemplateVars = map[string]struct{}{
 	"kwargs_json":        {},
 }
 
-// IsBuiltinTemplateVar reports whether name is a skill-eval-provided template
+// IsBuiltinTemplateVar reports whether name is a skill-up-provided template
 // variable (including any kwargs.<key> reference). Such names are resolved at
 // run time, not at config-load time.
 func IsBuiltinTemplateVar(name string) bool {
