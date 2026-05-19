@@ -478,3 +478,19 @@ func TestResolveRunnerInitParams_KeepsCustomForCustomEngine(t *testing.T) {
 		t.Fatal("Custom = nil, want it preserved for a custom engine")
 	}
 }
+
+func TestResolveRunnerInitParams_AllowsCLIAPIKeyForProviderlessCustomEngine(t *testing.T) {
+	custom := &config.CustomEngineConfig{
+		Transport: "local",
+		Local:     &config.CustomLocalConfig{Command: "/opt/agent"},
+	}
+	params := ResolveRunnerInitParams("my-agent", config.EngineConfig{
+		Name:   "my-agent",
+		Custom: custom,
+	}, nil, "", "sk-cli-key")
+
+	// A custom engine references the CLI key via ${api_key}; no provider needed.
+	if params.APIKey != "sk-cli-key" || params.APIKeySource != ValueSourceCLI {
+		t.Fatalf("APIKey = %q (source %s), want the CLI key honored", params.APIKey, params.APIKeySource)
+	}
+}

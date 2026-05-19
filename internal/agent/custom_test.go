@@ -184,6 +184,36 @@ func TestCustomAgent_RunLocal_TextFormat(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_IgnoresStaleOutputFile(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// Pre-seed a stale default output file, as a fixture or setup step might.
+	stale := filepath.Join(rt.Workspace(), "outputs", "session-result.json")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"exit_code":0,"final_message":"STALE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The command returns its result on stdout and never writes the file.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"fresh-stdout"}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "fresh-stdout" {
+		t.Fatalf("final_message = %q, want fresh-stdout (stale output file must be ignored)", res.FinalMessage)
+	}
+}
+
 func TestCustomAgent_RunLocal_TextIgnoresOutputFile(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
@@ -433,13 +463,14 @@ func TestCustomAgent_RunLocal_RegistersFrameworkInputFile(t *testing.T) {
 func TestCustomAgent_RunLocal_PartialResultOnTimeout(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
-	// The engine prints a valid result, then hangs past the timeout.
+	// The engine prints a valid result, then hangs well past the timeout.
+	// The 2s budget keeps the echo reliably captured even on a loaded CI.
 	ag := customLocalAgent(&config.CustomEngineConfig{
 		Transport:      "local",
-		TimeoutSeconds: 1,
+		TimeoutSeconds: 2,
 		Local: &config.CustomLocalConfig{
 			Command: "sh",
-			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"partial answer"}'; sleep 5`},
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"partial answer"}'; sleep 30`},
 		},
 	})
 

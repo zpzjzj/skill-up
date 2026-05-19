@@ -126,6 +126,12 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 		return a.errorResult(0), fmt.Errorf("write session input: %w", err)
 	}
 
+	// Remove any stale output file so a result left by a fixture or a previous
+	// run is never mistaken for this invocation's output.
+	if _, err := rt.Exec(ctx, "rm -f -- "+shellQuote(outputFile), ExecOptions{}); err != nil {
+		logging.DebugContextf(ctx, "CustomAgent: could not clear stale output file %s: %v", outputFile, err)
+	}
+
 	cmd, execOpts, err := a.buildLocalExec(ctx, rt, opts, custom, vars, timeoutSec)
 	if err != nil {
 		return a.errorResult(0), err

@@ -186,7 +186,10 @@ func applyCLIOverrides(params *AgentInitParams, cliModel string, cliAPIKey strin
 	if cliAPIKey == "" {
 		return
 	}
-	if params.Provider == "" {
+	// A custom engine references the CLI key explicitly via ${api_key} (e.g.
+	// engine.custom.env), so it does not need a model provider. Built-in
+	// engines still require a provider to scope the credential.
+	if params.Provider == "" && params.Custom == nil {
 		logging.Warnf("kind=%s engine=%s ignored.api_key reason=provider_required_for_cli_override", params.Kind, params.Engine)
 		return
 	}

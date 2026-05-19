@@ -4,8 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
+
+// sensitiveEnvNamePattern matches environment variable names that look like
+// credentials. Such values must not be rendered into a command line (where
+// runtimes record them on exec spans and in failure logs); they belong in
+// engine.custom.env. Word boundaries avoid false positives like MONKEY_PATH.
+var sensitiveEnvNamePattern = regexp.MustCompile(
+	`(?i)(^|_)(API_?KEY|ACCESS_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTHORIZATION)(_|$)`,
+)
+
+func isSensitiveEnvName(name string) bool {
+	return sensitiveEnvNamePattern.MatchString(name)
+}
 
 // builtinTemplateVars is the set of run-time template variable names provided
 // by skill-eval. References to these are left intact during config-time env
@@ -95,12 +108,18 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 
 	if custom.Local != nil {
 		l := custom.Local
-		resolve("local.command", &l.Command)
+		// command and args become a command line, so they reject secret-like
+		// env references; other local fields use the standard resolver.
+		if v, err := resolveEnvRefsStrict(l.Command); err != nil {
+			errs = append(errs, fmt.Sprintf("engine.custom.local.command: %s", err))
+		} else {
+			l.Command = v
+		}
 		resolve("local.cwd", &l.Cwd)
 		resolve("local.input_file", &l.InputFile)
 		resolve("local.output_file", &l.OutputFile)
 		for i := range l.Args {
-			rv, err := resolveEnvRefs(l.Args[i])
+			rv, err := resolveEnvRefsStrict(l.Args[i])
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("engine.custom.local.args[%d]: %s", i, err))
 				continue
@@ -202,6 +221,18 @@ func resolveEnvRefsInAny(v any) (any, error) {
 // resolveEnvRefs replaces ${VAR}, ${VAR:-default} and ${VAR?message} env
 // references in s. References to built-in template variables are left intact.
 func resolveEnvRefs(s string) (string, error) {
+	return resolveEnvRefsWith(s, false)
+}
+
+// resolveEnvRefsStrict behaves like resolveEnvRefs but rejects references to
+// secret-like environment variables. It is used for fields that become a
+// command line (local.command / local.args), keeping credentials out of
+// process listings and exec traces.
+func resolveEnvRefsStrict(s string) (string, error) {
+	return resolveEnvRefsWith(s, true)
+}
+
+func resolveEnvRefsWith(s string, rejectSecrets bool) (string, error) {
 	if s == "" || !strings.Contains(s, "${") {
 		return s, nil
 	}
@@ -222,7 +253,7 @@ func resolveEnvRefs(s string) (string, error) {
 			break
 		}
 		inner := s[start+2 : start+closeIdx]
-		value, leaveIntact, err := resolveEnvToken(inner)
+		value, leaveIntact, err := resolveEnvToken(inner, rejectSecrets)
 		if err != nil {
 			return "", err
 		}
@@ -236,7 +267,7 @@ func resolveEnvRefs(s string) (string, error) {
 	return b.String(), nil
 }
 
-func resolveEnvToken(inner string) (value string, leaveIntact bool, err error) {
+func resolveEnvToken(inner string, rejectSecrets bool) (value string, leaveIntact bool, err error) {
 	name := inner
 	var defaultVal, errMsg string
 	hasDefault, hasErrForm := false, false
@@ -248,6 +279,13 @@ func resolveEnvToken(inner string) (value string, leaveIntact bool, err error) {
 
 	if IsBuiltinTemplateVar(name) {
 		return "", true, nil
+	}
+
+	if rejectSecrets && isSensitiveEnvName(name) {
+		return "", false, fmt.Errorf(
+			"secret-like environment variable %q must not be referenced in a command line; pass credentials via engine.custom.env instead",
+			name,
+		)
 	}
 
 	if v := os.Getenv(name); v != "" {

@@ -143,6 +143,50 @@ func TestResolveCustomEngineConfig_ResolvesEnvForOverriddenEngine(t *testing.T) 
 	}
 }
 
+func TestResolveCustomEngineConfig_RejectsSecretEnvInCommand(t *testing.T) {
+	t.Setenv("CUSTOM_AGENT_TOKEN", "super-secret")
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local: &CustomLocalConfig{
+			Command: "/opt/agent",
+			Args:    []string{"--token", "${CUSTOM_AGENT_TOKEN}"},
+		},
+	})
+
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want a secret env reference rejected", err)
+	}
+}
+
+func TestResolveCustomEngineConfig_AllowsNonSecretEnvInCommand(t *testing.T) {
+	t.Setenv("REVIEW_AGENT_BIN", "/opt/review-agent")
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local:     &CustomLocalConfig{Command: "${REVIEW_AGENT_BIN}"},
+	})
+
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("ResolveCustomEngineConfig: %v", err)
+	}
+	if cfg.Engine.Custom.Local.Command != "/opt/review-agent" {
+		t.Fatalf("command = %q, want the non-secret env ref resolved", cfg.Engine.Custom.Local.Command)
+	}
+}
+
+func TestIsSensitiveEnvName(t *testing.T) {
+	for _, name := range []string{"CUSTOM_AGENT_TOKEN", "OPENAI_API_KEY", "MY_SECRET", "DB_PASSWORD", "GH_ACCESS_KEY"} {
+		if !isSensitiveEnvName(name) {
+			t.Errorf("isSensitiveEnvName(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"REVIEW_AGENT_BIN", "MONKEY_PATH", "WORKSPACE_DIR", "AGENT_ENDPOINT"} {
+		if isSensitiveEnvName(name) {
+			t.Errorf("isSensitiveEnvName(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestIsBuiltinTemplateVar(t *testing.T) {
 	for _, name := range []string{"workspace", "prompt", "api_key", "input_file", "kwargs", "kwargs.profile"} {
 		if !IsBuiltinTemplateVar(name) {
