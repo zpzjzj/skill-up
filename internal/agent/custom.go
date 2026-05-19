@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -92,17 +93,27 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 		timeoutSec = opts.TimeoutSec
 	}
 
-	sess := a.buildSessionInput(rt, opts, messages, custom, timeoutSec)
-	vars, err := a.buildTemplateVars(rt, opts, messages, custom, sess, timeoutSec)
+	// Build template variables in stages so per-case kwargs can themselves use
+	// built-in template variables (e.g. ${case_id}): resolve I/O paths, render
+	// kwargs against the base variables, then assemble the full variable set.
+	baseVars := a.buildBaseVars(rt, opts, messages, timeoutSec)
+
+	inputFile, outputFile, err := resolveCustomIOFiles(rt, custom, baseVars)
 	if err != nil {
 		return a.errorResult(0), err
+	}
+	baseVars["input_file"], baseVars["output_file"] = inputFile, outputFile
+
+	renderedKwargs, err := renderTemplateMap(custom.Kwargs, baseVars)
+	if err != nil {
+		return a.errorResult(0), fmt.Errorf("render custom.kwargs: %w", err)
 	}
 
-	inputFile, outputFile, err := resolveCustomIOFiles(rt, custom, vars)
+	sess := a.buildSessionInput(rt, opts, messages, renderedKwargs, timeoutSec)
+	vars, err := a.completeTemplateVars(baseVars, renderedKwargs, sess)
 	if err != nil {
 		return a.errorResult(0), err
 	}
-	vars["input_file"], vars["output_file"] = inputFile, outputFile
 
 	sessJSON, err := json.Marshal(sess)
 	if err != nil {
@@ -127,7 +138,7 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 	}
 
 	result, execErr := rt.Exec(execCtx, cmd, execOpts)
-	return a.finishLocal(ctx, rt, opts, custom, result, execErr, outputFile, start, messages)
+	return a.finishLocal(ctx, rt, opts, custom, result, execErr, inputFile, outputFile, start, messages)
 }
 
 // buildLocalExec renders the command, args and exec options for the local run.
@@ -178,37 +189,38 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 }
 
 // finishLocal turns a runtime exec result into a SessionResult.
-func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, outputFile string, start time.Time, messages []transcript.Message) (*SessionResult, error) {
+func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, inputFile, outputFile string, start time.Time, messages []transcript.Message) (*SessionResult, error) {
 	durationMs := time.Since(start).Milliseconds()
+
+	// On a timeout/cancel the command may already have emitted a valid result;
+	// still read it so judges and expect checks can inspect the partial answer.
+	var (
+		raw            string
+		usedOutputFile bool
+	)
+	if execErr == nil || isTimeoutError(execErr) {
+		raw, usedOutputFile = a.readRawResult(ctx, rt, custom, result, outputFile)
+	}
+
+	res, parseErr := a.buildResult(ctx, rt, opts, custom, raw, result, durationMs, messages)
+
 	if execErr != nil {
-		res := a.errorResult(result.ExitCode)
-		res.DurationMs, res.Stderr = durationMs, result.Stderr
-		res.Transcript = minimalCustomTranscript(messages, "")
+		if parseErr != nil {
+			// Nothing usable was produced before the failure.
+			res = a.errorResult(result.ExitCode)
+			res.DurationMs = durationMs
+			res.Transcript = minimalCustomTranscript(messages, "")
+		}
+		if res.Stderr == "" {
+			res.Stderr = result.Stderr
+		}
+		a.registerFrameworkIO(res, inputFile, outputFile, usedOutputFile)
 		return res, fmt.Errorf("custom engine run failed: %w", execErr)
 	}
 
-	raw := a.readRawResult(ctx, rt, custom, result, outputFile)
-
-	if customResponseFormat(custom) == customResponseText {
-		finalMsg := strings.TrimSpace(raw)
-		res := &SessionResult{
-			Engine:       a.Name(),
-			ExitCode:     result.ExitCode,
-			DurationMs:   durationMs,
-			FinalMessage: finalMsg,
-			Stderr:       result.Stderr,
-			Transcript:   minimalCustomTranscript(messages, finalMsg),
-			Artifacts:    &SessionArtifacts{},
-		}
-		if result.ExitCode != 0 {
-			return res, fmt.Errorf("custom engine run failed (exit %d)", result.ExitCode)
-		}
-		return res, nil
-	}
-
-	res, err := a.parseSessionResult(ctx, rt, opts, raw, durationMs, messages)
-	if err != nil {
-		return res, err
+	a.registerFrameworkIO(res, inputFile, outputFile, usedOutputFile)
+	if parseErr != nil {
+		return res, parseErr
 	}
 	// A non-zero process exit is a failed run even when the engine's JSON
 	// reports exit_code 0 (e.g. a wrapper that crashed after printing output).
@@ -226,13 +238,54 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 	return res, nil
 }
 
+// buildResult parses raw engine output into a SessionResult according to the
+// configured response_format. The text format never errors; session_result
+// returns a parse error when the payload is missing or malformed.
+func (a *CustomAgent) buildResult(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, raw string, result ExecResult, durationMs int64, messages []transcript.Message) (*SessionResult, error) {
+	if customResponseFormat(custom) == customResponseText {
+		finalMsg := strings.TrimSpace(raw)
+		return &SessionResult{
+			Engine:       a.Name(),
+			ExitCode:     result.ExitCode,
+			DurationMs:   durationMs,
+			FinalMessage: finalMsg,
+			Stderr:       result.Stderr,
+			Transcript:   minimalCustomTranscript(messages, finalMsg),
+			Artifacts:    &SessionArtifacts{},
+		}, nil
+	}
+	return a.parseSessionResult(ctx, rt, opts, raw, durationMs, messages)
+}
+
+// isTimeoutError reports whether err is a context deadline/cancellation, which
+// means the command was interrupted rather than failing to start.
+func isTimeoutError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// registerFrameworkIO records the framework-written input/output files in
+// GeneratedFiles so the workspace-diff collector excludes them (they would
+// otherwise show up as user changes) and they are archived for debugging.
+func (a *CustomAgent) registerFrameworkIO(res *SessionResult, inputFile, outputFile string, usedOutputFile bool) {
+	if res.Artifacts == nil {
+		res.Artifacts = &SessionArtifacts{}
+	}
+	if inputFile != "" {
+		res.Artifacts.GeneratedFiles = append(res.Artifacts.GeneratedFiles, inputFile)
+	}
+	if usedOutputFile && outputFile != "" {
+		res.Artifacts.GeneratedFiles = append(res.Artifacts.GeneratedFiles, outputFile)
+	}
+}
+
 // readRawResult reads the result payload from the output file when present,
 // otherwise from stdout. The output file is consulted even when local.output_file
 // is omitted, since a custom engine may write to the default ${output_file}
-// path; a missing default file simply falls back to stdout.
-func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *config.CustomEngineConfig, result ExecResult, outputFile string) string {
+// path; a missing default file simply falls back to stdout. The boolean reports
+// whether the result was actually read from the output file.
+func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *config.CustomEngineConfig, result ExecResult, outputFile string) (string, bool) {
 	if outputFile == "" {
-		return result.Stdout
+		return result.Stdout, false
 	}
 	explicit := custom.Local.OutputFile != ""
 
@@ -241,7 +294,7 @@ func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *con
 	tmpFile, err := os.CreateTemp("", "skill-up-custom-result-*")
 	if err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot create temp file for output_file %s, falling back to stdout: %v", outputFile, err)
-		return result.Stdout
+		return result.Stdout, false
 	}
 	tmp := tmpFile.Name()
 	_ = tmpFile.Close()
@@ -253,17 +306,17 @@ func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *con
 		} else {
 			logging.DebugContextf(ctx, "CustomAgent: default output_file %s not produced, using stdout", outputFile)
 		}
-		return result.Stdout
+		return result.Stdout, false
 	}
 	data, err := os.ReadFile(tmp)
 	if err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
-		return result.Stdout
+		return result.Stdout, false
 	}
 	if strings.TrimSpace(string(data)) == "" {
-		return result.Stdout
+		return result.Stdout, false
 	}
-	return string(data)
+	return string(data), true
 }
 
 // parsedSessionResult mirrors the SessionResult JSON contract but keeps
@@ -356,15 +409,20 @@ func minimalCustomTranscript(messages []transcript.Message, finalMsg string) tra
 }
 
 // collectArtifacts folds structured artifacts.files entries into the report
-// pipeline: path entries are registered (downloaded under their declared name
-// when it differs from the basename), inline content is written to the case
-// artifact directory. url-based artifacts are deferred to the http phase.
+// pipeline: path entries register the original workspace path (so the
+// workspace-diff collector excludes it) and, when the declared name differs
+// from the basename, additionally archive a copy under that name; inline
+// content is written to the case artifact directory. url-based artifacts are
+// deferred to the http phase.
 func (a *CustomAgent) collectArtifacts(ctx context.Context, rt Runtime, opts ExecOptions, artifacts *SessionArtifacts) {
 	for _, f := range artifacts.Files {
 		switch {
 		case f.Path != "":
-			if path := a.registerPathArtifact(ctx, rt, opts, f); path != "" {
-				artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, path)
+			// Keep the original path: the archiver downloads it (under its
+			// basename) and the workspace-diff collector excludes it.
+			artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, f.Path)
+			if renamed := a.archiveRenamedPathArtifact(ctx, rt, opts, f); renamed != "" {
+				artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, renamed)
 			}
 		case f.Content != "" || f.ContentBase64 != "":
 			if path := a.writeInlineArtifact(ctx, opts, f); path != "" {
@@ -376,19 +434,19 @@ func (a *CustomAgent) collectArtifacts(ctx context.Context, rt Runtime, opts Exe
 	}
 }
 
-// registerPathArtifact returns a runtime/host path for a path-based artifact.
-// When the declared name differs from the file's basename, it materializes the
-// file into the case artifact directory under that name so the archiver (which
-// keys on basename) preserves the declared artifact name.
-func (a *CustomAgent) registerPathArtifact(ctx context.Context, rt Runtime, opts ExecOptions, f ArtifactFile) string {
+// archiveRenamedPathArtifact materializes a path-based artifact into the case
+// artifact directory under its declared name when that name differs from the
+// file's basename, so the archiver (which keys on basename) preserves it. It
+// returns the host copy path, or an empty string when no rename is needed.
+func (a *CustomAgent) archiveRenamedPathArtifact(ctx context.Context, rt Runtime, opts ExecOptions, f ArtifactFile) string {
 	name := filepath.Base(f.Name)
 	if f.Name == "" || opts.ArtifactDir == "" || name == filepath.Base(f.Path) {
-		return f.Path
+		return ""
 	}
 	dest := filepath.Join(opts.ArtifactDir, name)
 	if err := rt.DownloadFile(ctx, f.Path, dest); err != nil {
-		logging.WarnContextf(ctx, "CustomAgent: cannot archive artifact %q from %s, keeping original path: %v", name, f.Path, err)
-		return f.Path
+		logging.WarnContextf(ctx, "CustomAgent: cannot archive artifact %q from %s: %v", name, f.Path, err)
+		return ""
 	}
 	return dest
 }
@@ -459,7 +517,7 @@ type sessionMessage struct {
 	Content string `json:"content"`
 }
 
-func (a *CustomAgent) buildSessionInput(rt Runtime, opts ExecOptions, messages []transcript.Message, custom *config.CustomEngineConfig, timeoutSec int) sessionInput {
+func (a *CustomAgent) buildSessionInput(rt Runtime, opts ExecOptions, messages []transcript.Message, kwargs map[string]string, timeoutSec int) sessionInput {
 	msgs := make([]sessionMessage, 0, len(messages))
 	for _, m := range messages {
 		msgs = append(msgs, sessionMessage{Role: string(m.Role), Content: m.Content})
@@ -469,14 +527,38 @@ func (a *CustomAgent) buildSessionInput(rt Runtime, opts ExecOptions, messages [
 		Variant:        opts.Variant,
 		Workspace:      rt.Workspace(),
 		Model:          formatAgentModel(a.Cfg.ModelProvider, a.Cfg.ModelName),
-		Kwargs:         custom.Kwargs,
+		Kwargs:         kwargs,
 		Messages:       msgs,
 		MaxTurns:       opts.MaxTurns,
 		TimeoutSeconds: timeoutSec,
 	}
 }
 
-func (a *CustomAgent) buildTemplateVars(rt Runtime, opts ExecOptions, messages []transcript.Message, custom *config.CustomEngineConfig, sess sessionInput, timeoutSec int) (map[string]string, error) {
+// buildBaseVars builds the scalar template variables that do not depend on
+// custom.kwargs (so kwargs can themselves reference them) or on the session
+// input. input_file/output_file start at their defaults and are overwritten
+// once resolveCustomIOFiles has run.
+func (a *CustomAgent) buildBaseVars(rt Runtime, opts ExecOptions, messages []transcript.Message, timeoutSec int) map[string]string {
+	workspace := rt.Workspace()
+	return map[string]string{
+		"workspace":       workspace,
+		"prompt":          singleTurnPrompt(messages),
+		"input_file":      filepath.Join(workspace, customDefaultInputFile),
+		"output_file":     filepath.Join(workspace, customDefaultOutputFile),
+		"model":           formatAgentModel(a.Cfg.ModelProvider, a.Cfg.ModelName),
+		"model_provider":  a.Cfg.ModelProvider,
+		"model_name":      a.Cfg.ModelName,
+		"api_key":         a.Cfg.APIKey,
+		"case_id":         opts.CaseID,
+		"variant":         opts.Variant,
+		"max_turns":       strconv.Itoa(opts.MaxTurns),
+		"timeout_seconds": strconv.Itoa(timeoutSec),
+	}
+}
+
+// completeTemplateVars extends the base variables with the rendered kwargs and
+// the session-input-derived structured values.
+func (a *CustomAgent) completeTemplateVars(baseVars, renderedKwargs map[string]string, sess sessionInput) (map[string]string, error) {
 	sessJSON, err := json.Marshal(sess)
 	if err != nil {
 		return nil, fmt.Errorf("marshal session input: %w", err)
@@ -485,33 +567,20 @@ func (a *CustomAgent) buildTemplateVars(rt Runtime, opts ExecOptions, messages [
 	if err != nil {
 		return nil, fmt.Errorf("marshal messages: %w", err)
 	}
-	kwargsJSON, err := json.Marshal(orEmptyMap(custom.Kwargs))
+	kwargsJSON, err := json.Marshal(orEmptyMap(renderedKwargs))
 	if err != nil {
 		return nil, fmt.Errorf("marshal kwargs: %w", err)
 	}
 
-	workspace := rt.Workspace()
-	vars := map[string]string{
-		"workspace":          workspace,
-		"prompt":             singleTurnPrompt(messages),
-		"messages":           string(msgsJSON),
-		"messages_json":      string(msgsJSON),
-		"session_input":      string(sessJSON),
-		"session_input_json": string(sessJSON),
-		"input_file":         filepath.Join(workspace, customDefaultInputFile),
-		"output_file":        filepath.Join(workspace, customDefaultOutputFile),
-		"model":              formatAgentModel(a.Cfg.ModelProvider, a.Cfg.ModelName),
-		"model_provider":     a.Cfg.ModelProvider,
-		"model_name":         a.Cfg.ModelName,
-		"api_key":            a.Cfg.APIKey,
-		"case_id":            opts.CaseID,
-		"variant":            opts.Variant,
-		"max_turns":          strconv.Itoa(opts.MaxTurns),
-		"timeout_seconds":    strconv.Itoa(timeoutSec),
-		"kwargs":             string(kwargsJSON),
-		"kwargs_json":        string(kwargsJSON),
-	}
-	for k, v := range custom.Kwargs {
+	vars := make(map[string]string, len(baseVars)+len(renderedKwargs)+6)
+	maps.Copy(vars, baseVars)
+	vars["messages"] = string(msgsJSON)
+	vars["messages_json"] = string(msgsJSON)
+	vars["session_input"] = string(sessJSON)
+	vars["session_input_json"] = string(sessJSON)
+	vars["kwargs"] = string(kwargsJSON)
+	vars["kwargs_json"] = string(kwargsJSON)
+	for k, v := range renderedKwargs {
 		vars["kwargs."+k] = v
 	}
 	return vars, nil

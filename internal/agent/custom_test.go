@@ -319,14 +319,81 @@ func TestCustomAgent_RunLocal_PathArtifactPreservesName(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(artifactDir, "report.md")); statErr != nil {
 		t.Fatalf("artifact not archived under declared name: %v", statErr)
 	}
-	found := false
-	for _, gf := range res.Artifacts.GeneratedFiles {
-		if filepath.Base(gf) == "report.md" {
-			found = true
-		}
-	}
-	if !found {
+	if !containsBasename(res.Artifacts.GeneratedFiles, "report.md") {
 		t.Fatalf("generated_files = %v, want an entry named report.md", res.Artifacts.GeneratedFiles)
+	}
+	// The original workspace path must also be registered so the workspace
+	// diff collector excludes it.
+	if !containsBasename(res.Artifacts.GeneratedFiles, "gen-xyz.tmp") {
+		t.Fatalf("generated_files = %v, want the original path kept for diff exclusion", res.Artifacts.GeneratedFiles)
+	}
+}
+
+func TestCustomAgent_RunLocal_RegistersFrameworkInputFile(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"ok"}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The framework-written input file must be registered so it is excluded
+	// from workspace diffs.
+	if !containsBasename(res.Artifacts.GeneratedFiles, "messages.json") {
+		t.Fatalf("generated_files = %v, want the framework input file registered", res.Artifacts.GeneratedFiles)
+	}
+}
+
+func TestCustomAgent_RunLocal_PartialResultOnTimeout(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// The engine prints a valid result, then hangs past the timeout.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport:      "local",
+		TimeoutSeconds: 1,
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"partial answer"}'; sleep 5`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if res == nil || res.FinalMessage != "partial answer" {
+		t.Fatalf("res = %#v, want the partial result preserved", res)
+	}
+}
+
+func TestCustomAgent_RunLocal_RendersTemplatedKwargs(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// kwargs reference a built-in template variable; it must be rendered
+	// before reaching ${kwargs.*}.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport:      "local",
+		ResponseFormat: "text",
+		Kwargs:         map[string]string{"cid": "${case_id}"},
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", "printf %s ${kwargs.cid}"},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{CaseID: "case-42"}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "case-42" {
+		t.Fatalf("final_message = %q, want the rendered case_id (case-42)", res.FinalMessage)
 	}
 }
 
@@ -370,13 +437,22 @@ func TestCustomAgent_RunLocal_InlineArtifactRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(res.Artifacts.GeneratedFiles) != 1 {
-		t.Fatalf("generated_files = %v, want one inline artifact path", res.Artifacts.GeneratedFiles)
+	if !containsBasename(res.Artifacts.GeneratedFiles, "report.md") {
+		t.Fatalf("generated_files = %v, want the inline artifact registered", res.Artifacts.GeneratedFiles)
 	}
 	data, readErr := os.ReadFile(filepath.Join(artifactDir, "report.md"))
 	if readErr != nil || string(data) != "hello-artifact" {
 		t.Fatalf("inline artifact = %q (err %v), want hello-artifact", data, readErr)
 	}
+}
+
+func containsBasename(paths []string, base string) bool {
+	for _, p := range paths {
+		if filepath.Base(p) == base {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCustomAgent_RunHTTP_NotImplemented(t *testing.T) {

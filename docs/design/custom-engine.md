@@ -317,6 +317,10 @@ custom:
     profile: ${CUSTOM_AGENT_PROFILE:-default}
 ```
 
+`kwargs` values may also reference built-in template variables (for example
+`${case_id}` or `${prompt}`); they are rendered per case before being placed into the
+session input and exposed as `${kwargs.<key>}`.
+
 After resolution, `kwargs` flows into the local input file and the HTTP request body,
 and can also be referenced through template variables. All kwargs values are treated
 as strings; if the agent needs a number or boolean, it must parse it itself.
