@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alibaba/skill-up/internal/config"
 	"github.com/alibaba/skill-up/internal/runtime"
@@ -147,6 +150,75 @@ func TestCustomAgent_RunLocal_MissingExitCode(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_NonZeroProcessExitFails(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// The JSON reports success but the process crashes afterwards.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"ok"}'; exit 7`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err == nil || !strings.Contains(err.Error(), "exited 7") {
+		t.Fatalf("error = %v, want non-zero process exit error", err)
+	}
+	if res == nil {
+		t.Fatal("expected session result to be preserved")
+	}
+}
+
+func TestCustomAgent_RunLocal_TimeoutEnforced(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport:      "local",
+		TimeoutSeconds: 1,
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", "sleep 5"},
+		},
+	})
+
+	start := time.Now()
+	_, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("run took %s, want the 1s timeout to be enforced", elapsed)
+	}
+}
+
+func TestCustomAgent_RunLocal_InlineArtifactRegistered(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	artifactDir := t.TempDir()
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"ok","artifacts":{"files":[{"name":"report.md","content":"hello-artifact"}]}}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{ArtifactDir: artifactDir}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Artifacts.GeneratedFiles) != 1 {
+		t.Fatalf("generated_files = %v, want one inline artifact path", res.Artifacts.GeneratedFiles)
+	}
+	data, readErr := os.ReadFile(filepath.Join(artifactDir, "report.md"))
+	if readErr != nil || string(data) != "hello-artifact" {
+		t.Fatalf("inline artifact = %q (err %v), want hello-artifact", data, readErr)
+	}
+}
+
 func TestCustomAgent_RunHTTP_NotImplemented(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
@@ -190,6 +262,27 @@ func TestRenderTemplate(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("renderTemplate(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestRenderTemplate_EmptyBuiltinHonorsDefaultAndError(t *testing.T) {
+	t.Parallel()
+	// Built-in vars present but empty (e.g. unconfigured api_key / model).
+	vars := map[string]string{"api_key": "", "model": ""}
+
+	got, err := renderTemplate("model=${model:-gpt-fallback}", vars)
+	if err != nil || got != "model=gpt-fallback" {
+		t.Fatalf("renderTemplate default = %q (err %v), want model=gpt-fallback", got, err)
+	}
+
+	if _, err := renderTemplate("${api_key?api key required}", vars); err == nil ||
+		!strings.Contains(err.Error(), "api key required") {
+		t.Fatalf("error = %v, want required-form error for empty api_key", err)
+	}
+
+	// A plain reference to an empty built-in still resolves to empty.
+	if got, err := renderTemplate("[${model}]", vars); err != nil || got != "[]" {
+		t.Fatalf("renderTemplate plain = %q (err %v), want []", got, err)
 	}
 }
 

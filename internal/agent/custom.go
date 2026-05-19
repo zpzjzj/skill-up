@@ -99,7 +99,16 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 		return a.errorResult(0), err
 	}
 
-	result, execErr := rt.Exec(ctx, cmd, execOpts)
+	// Enforce the custom timeout via a context deadline: some runtimes
+	// (e.g. NoneRuntime) do not honor ExecOptions.TimeoutSec directly.
+	execCtx := ctx
+	if timeoutSec > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+		defer cancel()
+	}
+
+	result, execErr := rt.Exec(execCtx, cmd, execOpts)
 	return a.finishLocal(ctx, rt, opts, custom, result, execErr, outputFile, start)
 }
 
@@ -166,6 +175,11 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 	if err != nil {
 		return res, err
 	}
+	// A non-zero process exit is a failed run even when the engine's JSON
+	// reports exit_code 0 (e.g. a wrapper that crashed after printing output).
+	if result.ExitCode != 0 {
+		return res, fmt.Errorf("custom engine command exited %d: %s", result.ExitCode, result.Stderr)
+	}
 	if res.ExitCode != 0 {
 		return res, fmt.Errorf("custom engine run failed (exit %d): %s", res.ExitCode, res.Stderr)
 	}
@@ -177,12 +191,20 @@ func (a *CustomAgent) readRawResult(ctx context.Context, rt Runtime, custom *con
 	if custom.Local.OutputFile == "" {
 		return result.Stdout
 	}
-	tmp := filepath.Join(os.TempDir(), "skill-up-custom-result-"+filepath.Base(outputFile))
+	// A per-call temp file avoids collisions when parallel cases share the
+	// same output_file basename (e.g. the documented default).
+	tmpFile, err := os.CreateTemp("", "skill-up-custom-result-*")
+	if err != nil {
+		logging.WarnContextf(ctx, "CustomAgent: cannot create temp file for output_file %s, falling back to stdout: %v", outputFile, err)
+		return result.Stdout
+	}
+	tmp := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmp) }()
 	if err := rt.DownloadFile(ctx, outputFile, tmp); err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
 		return result.Stdout
 	}
-	defer func() { _ = os.Remove(tmp) }()
 	data, err := os.ReadFile(tmp)
 	if err != nil {
 		logging.WarnContextf(ctx, "CustomAgent: cannot read output_file %s, falling back to stdout: %v", outputFile, err)
@@ -254,33 +276,37 @@ func (a *CustomAgent) collectArtifacts(ctx context.Context, opts ExecOptions, ar
 		case f.Path != "":
 			artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, f.Path)
 		case f.Content != "" || f.ContentBase64 != "":
-			a.writeInlineArtifact(ctx, opts, f)
+			if path := a.writeInlineArtifact(ctx, opts, f); path != "" {
+				artifacts.GeneratedFiles = append(artifacts.GeneratedFiles, path)
+			}
 		case f.URL != "":
 			logging.DebugContextf(ctx, "CustomAgent: artifact %q url is not downloaded in the local transport", f.Name)
 		}
 	}
 }
 
-func (a *CustomAgent) writeInlineArtifact(ctx context.Context, opts ExecOptions, f ArtifactFile) {
-	if opts.ArtifactDir == "" {
-		return
+// writeInlineArtifact materializes an inline artifact into the case artifact
+// directory and returns its path so the caller can register it for archiving.
+// It returns an empty string when nothing was written.
+func (a *CustomAgent) writeInlineArtifact(ctx context.Context, opts ExecOptions, f ArtifactFile) string {
+	if opts.ArtifactDir == "" || f.Name == "" {
+		return ""
 	}
 	content := f.Content
 	if f.ContentBase64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(f.ContentBase64)
 		if err != nil {
 			logging.WarnContextf(ctx, "CustomAgent: artifact %q has invalid content_base64: %v", f.Name, err)
-			return
+			return ""
 		}
 		content = string(decoded)
 	}
-	name := f.Name
-	if name == "" {
-		return
+	path, err := writeLocalArtifact(opts.ArtifactDir, f.Name, content)
+	if err != nil {
+		logging.WarnContextf(ctx, "CustomAgent: cannot write inline artifact %q: %v", f.Name, err)
+		return ""
 	}
-	if _, err := writeLocalArtifact(opts.ArtifactDir, name, content); err != nil {
-		logging.WarnContextf(ctx, "CustomAgent: cannot write inline artifact %q: %v", name, err)
-	}
+	return path
 }
 
 func (a *CustomAgent) errorResult(exitCode int) *SessionResult {
@@ -476,11 +502,11 @@ func resolveTemplateToken(inner string, vars map[string]string) (string, error) 
 	}
 
 	if v, ok := vars[name]; ok {
-		return v, nil
-	}
-	// kwargs.<key> references that were not provided resolve to empty.
-	if strings.HasPrefix(name, "kwargs.") {
-		return "", nil
+		// A present-but-empty built-in value (e.g. an unconfigured api_key)
+		// is treated as unset so ${X:-default} and ${X?msg} still apply.
+		if v != "" || (!hasDefault && !hasErrForm) {
+			return v, nil
+		}
 	}
 	if v := os.Getenv(name); v != "" {
 		return v, nil
@@ -493,6 +519,10 @@ func resolveTemplateToken(inner string, vars map[string]string) (string, error) 
 			errMsg = name + " is required"
 		}
 		return "", errors.New(errMsg)
+	}
+	// kwargs.<key> references that were not provided resolve to empty.
+	if strings.HasPrefix(name, "kwargs.") {
+		return "", nil
 	}
 	return "", fmt.Errorf("unresolved template variable %q", name)
 }

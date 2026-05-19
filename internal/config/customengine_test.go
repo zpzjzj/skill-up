@@ -93,6 +93,23 @@ func TestResolveCustomEngineEnv_NoCustomIsNoop(t *testing.T) {
 	}
 }
 
+func TestResolveCustomEngineEnv_BuiltinEngineSkipsResolution(t *testing.T) {
+	// A built-in engine ignores engine.custom, so an unresolvable ${VAR}
+	// inside an ignored custom block must not fail config loading.
+	cfg := &EvalConfig{
+		Engine: EngineConfig{
+			Name: "codex",
+			Custom: &CustomEngineConfig{
+				Transport: "local",
+				Local:     &CustomLocalConfig{Command: "${DEFINITELY_MISSING_VAR}"},
+			},
+		},
+	}
+	if err := resolveCustomEngineEnv(cfg); err != nil {
+		t.Fatalf("resolveCustomEngineEnv for built-in engine: %v", err)
+	}
+}
+
 func TestIsBuiltinTemplateVar(t *testing.T) {
 	for _, name := range []string{"workspace", "prompt", "api_key", "input_file", "kwargs", "kwargs.profile"} {
 		if !IsBuiltinTemplateVar(name) {

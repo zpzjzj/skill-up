@@ -43,11 +43,13 @@ func IsBuiltinTemplateVar(name string) bool {
 }
 
 // resolveCustomEngineEnv resolves ${VAR} environment-variable references inside
-// the custom engine config tree. It is a no-op when engine.custom is absent.
-// Built-in template variables are left intact for run-time resolution.
+// the custom engine config tree. It is a no-op when engine.custom is absent or
+// when engine.name is a built-in agent (which ignores engine.custom entirely,
+// matching validateEngine). Built-in template variables are left intact for
+// run-time resolution.
 func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	custom := cfg.Engine.Custom
-	if custom == nil {
+	if custom == nil || isBuiltinEngineName(cfg.Engine.Name) {
 		return nil
 	}
 
