@@ -446,3 +446,35 @@ func TestResolveRunnerInitParams_UsesGenericProviderScopedEnv(t *testing.T) {
 		t.Fatalf("unexpected base-url resolution: %#v", params)
 	}
 }
+
+func TestResolveRunnerInitParams_DropsCustomForBuiltinEngine(t *testing.T) {
+	custom := &config.CustomEngineConfig{
+		Transport: "local",
+		Local:     &config.CustomLocalConfig{Command: "/opt/agent"},
+	}
+	params := ResolveRunnerInitParams("codex", config.EngineConfig{
+		Name:   "codex",
+		Custom: custom,
+		Model:  config.ModelConfig{Name: "auto"},
+	}, nil, "", "")
+
+	// A built-in engine ignores engine.custom; it must not leak into params.
+	if params.Custom != nil {
+		t.Fatalf("Custom = %#v, want nil for a built-in engine", params.Custom)
+	}
+}
+
+func TestResolveRunnerInitParams_KeepsCustomForCustomEngine(t *testing.T) {
+	custom := &config.CustomEngineConfig{
+		Transport: "local",
+		Local:     &config.CustomLocalConfig{Command: "/opt/agent"},
+	}
+	params := ResolveRunnerInitParams("my-agent", config.EngineConfig{
+		Name:   "my-agent",
+		Custom: custom,
+	}, nil, "", "")
+
+	if params.Custom == nil {
+		t.Fatal("Custom = nil, want it preserved for a custom engine")
+	}
+}

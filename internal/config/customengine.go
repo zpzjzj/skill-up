@@ -42,10 +42,11 @@ func IsBuiltinTemplateVar(name string) bool {
 	return ok
 }
 
-// ResolveCustomEngineConfig re-runs environment-variable resolution and engine
-// validation for the current engine.Name. It exists for the CLI --engine
-// override path: when eval.yaml named a built-in engine, engine.custom is
-// skipped at load time, so an override to a custom engine must process it now.
+// ResolveCustomEngineConfig runs environment-variable resolution and engine
+// validation for the current engine.Name. The loader intentionally defers
+// this: the final engine name is only known after CLI overrides (--engine),
+// so callers invoke this once that name is settled. It is a no-op for built-in
+// engines, which ignore any engine.custom block.
 func ResolveCustomEngineConfig(cfg *EvalConfig) error {
 	if err := resolveCustomEngineEnv(cfg); err != nil {
 		return err
@@ -63,7 +64,7 @@ func ResolveCustomEngineConfig(cfg *EvalConfig) error {
 // run-time resolution.
 func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	custom := cfg.Engine.Custom
-	if custom == nil || isBuiltinEngineName(cfg.Engine.Name) {
+	if custom == nil || IsBuiltinEngineName(cfg.Engine.Name) {
 		return nil
 	}
 
@@ -136,6 +137,16 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 // resolveModelEnv resolves env references in engine.model string values.
 func resolveModelEnv(model *ModelConfig) []string {
 	var errs []string
+	if v, err := resolveEnvRefs(model.Provider); err != nil {
+		errs = append(errs, fmt.Sprintf("engine.model.provider: %s", err))
+	} else {
+		model.Provider = v
+	}
+	if v, err := resolveEnvRefs(model.Name); err != nil {
+		errs = append(errs, fmt.Sprintf("engine.model.name: %s", err))
+	} else {
+		model.Name = v
+	}
 	if v, err := resolveEnvRefs(model.BaseURL); err != nil {
 		errs = append(errs, fmt.Sprintf("engine.model.base_url: %s", err))
 	} else {

@@ -69,13 +69,9 @@ func (l *Loader) LoadEvalConfig() (*EvalConfig, error) {
 		return nil, fmt.Errorf("failed to parse eval.yaml: %w", err)
 	}
 
-	// Resolve ${VAR} environment-variable references inside the custom engine
-	// config tree. Built-in template variables (${workspace}, ${prompt}, ...)
-	// are left intact for run-time resolution.
-	if err := resolveCustomEngineEnv(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to resolve eval.yaml: %w", err)
-	}
-
+	// Custom engine env resolution and validation are intentionally deferred:
+	// the final engine name is only known after CLI overrides (--engine), so
+	// the caller invokes ResolveCustomEngineConfig once that is settled.
 	return &cfg, nil
 }
 

@@ -38,7 +38,9 @@ var builtinEngineNames = map[string]struct{}{
 	"qoder-cli":   {},
 }
 
-func isBuiltinEngineName(name string) bool {
+// IsBuiltinEngineName reports whether name matches a built-in agent. A
+// built-in engine ignores any engine.custom block.
+func IsBuiltinEngineName(name string) bool {
 	_, ok := builtinEngineNames[name]
 	return ok
 }
@@ -76,7 +78,8 @@ func (v *Validator) ValidateEvalConfig(cfg *EvalConfig) error {
 		errs = append(errs, "engine.name is required")
 	}
 
-	errs = append(errs, validateEngine(cfg.Engine)...)
+	// engine.custom validation is deferred to ResolveCustomEngineConfig, which
+	// runs after CLI overrides settle the final engine name.
 
 	// engine.model.provider and engine.model.name are optional.
 	// When omitted, the engine uses its local default model configuration.
@@ -193,7 +196,7 @@ func validateEngine(engine EngineConfig) []string {
 	if engine.Name == "" {
 		return nil
 	}
-	if isBuiltinEngineName(engine.Name) {
+	if IsBuiltinEngineName(engine.Name) {
 		return nil
 	}
 	if engine.Custom == nil {

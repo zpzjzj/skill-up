@@ -116,13 +116,20 @@ func parseJudgeModel(value string) (provider, model string) {
 }
 
 func resolveAgentInitParams(in agentResolveInput) AgentInitParams {
+	// A built-in engine ignores any engine.custom block, so it is not carried
+	// into the init params — otherwise downstream logic (e.g. the model "auto"
+	// strip) would mistake a built-in engine for a custom one.
+	custom := in.custom
+	if config.IsBuiltinEngineName(in.engine) {
+		custom = nil
+	}
 	params := AgentInitParams{
 		Kind:     in.kind,
 		Engine:   in.engine,
 		Provider: in.provider,
 		Model:    in.model,
 		BaseURL:  in.baseURL,
-		Custom:   in.custom,
+		Custom:   custom,
 	}
 	if params.Provider != "" {
 		params.ProviderSource = in.valueSource

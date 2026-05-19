@@ -227,6 +227,30 @@ func TestCustomAgent_RunLocal_NonZeroExitCodePreserved(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_NonZeroExitWithoutJSON(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// The command crashes (non-zero exit) without ever emitting JSON.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo boom-stderr >&2; exit 42`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err == nil || !strings.Contains(err.Error(), "exited 42") {
+		t.Fatalf("error = %v, want the real command exit surfaced", err)
+	}
+	if res.ExitCode != 42 {
+		t.Fatalf("res.ExitCode = %d, want 42", res.ExitCode)
+	}
+	if !strings.Contains(res.Stderr, "boom-stderr") {
+		t.Fatalf("res.Stderr = %q, want the command stderr preserved", res.Stderr)
+	}
+}
+
 func TestCustomAgent_RunLocal_UnparseableResult(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -154,26 +156,25 @@ func TestIsBuiltinTemplateVar(t *testing.T) {
 	}
 }
 
-func validBaseEvalConfig() *EvalConfig {
+func customEngineEvalConfig(name string, custom *CustomEngineConfig) *EvalConfig {
 	return &EvalConfig{
 		SchemaVersion: "v1alpha1",
 		Environment:   Environment{Type: "none"},
-		Engine:        EngineConfig{Name: "claude_code"},
+		Engine:        EngineConfig{Name: name, Custom: custom},
 		Cases:         CasesConfig{Files: []string{"cases/a.yaml"}},
 	}
 }
 
-func TestValidateEvalConfig_NonBuiltinRequiresCustom(t *testing.T) {
-	cfg := validBaseEvalConfig()
-	cfg.Engine.Name = "my-agent"
+func TestResolveCustomEngineConfig_NonBuiltinRequiresCustom(t *testing.T) {
+	cfg := customEngineEvalConfig("my-agent", nil)
 
-	err := NewValidator().ValidateEvalConfig(cfg)
+	err := ResolveCustomEngineConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), `unsupported agent "my-agent": missing engine.custom`) {
 		t.Fatalf("error = %v, want missing engine.custom", err)
 	}
 }
 
-func TestValidateEvalConfig_CustomTransport(t *testing.T) {
+func TestResolveCustomEngineConfig_CustomTransport(t *testing.T) {
 	tests := []struct {
 		name      string
 		custom    *CustomEngineConfig
@@ -207,11 +208,9 @@ func TestValidateEvalConfig_CustomTransport(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := validBaseEvalConfig()
-			cfg.Engine.Name = "my-agent"
-			cfg.Engine.Custom = tc.custom
+			cfg := customEngineEvalConfig("my-agent", tc.custom)
 
-			err := NewValidator().ValidateEvalConfig(cfg)
+			err := ResolveCustomEngineConfig(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("error = %v, want %q", err, tc.wantError)
 			}
@@ -219,26 +218,75 @@ func TestValidateEvalConfig_CustomTransport(t *testing.T) {
 	}
 }
 
-func TestValidateEvalConfig_ValidCustomLocal(t *testing.T) {
-	cfg := validBaseEvalConfig()
-	cfg.Engine.Name = "my-agent"
-	cfg.Engine.Custom = &CustomEngineConfig{
+func TestResolveCustomEngineConfig_ValidCustomLocal(t *testing.T) {
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
 		Transport: "local",
 		Local:     &CustomLocalConfig{Command: "/opt/agent"},
-	}
+	})
 
-	if err := NewValidator().ValidateEvalConfig(cfg); err != nil {
-		t.Fatalf("ValidateEvalConfig: %v", err)
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("ResolveCustomEngineConfig: %v", err)
 	}
 }
 
-func TestValidateEvalConfig_BuiltinIgnoresCustom(t *testing.T) {
-	cfg := validBaseEvalConfig()
-	cfg.Engine.Name = "codex"
-	// A built-in engine with a bogus custom block must not be validated.
-	cfg.Engine.Custom = &CustomEngineConfig{Transport: "bogus"}
+func TestResolveCustomEngineConfig_BuiltinIgnoresCustom(t *testing.T) {
+	// A built-in engine ignores engine.custom entirely: neither a bogus
+	// transport nor an unresolvable ${VAR} (which a --engine override to a
+	// built-in engine may leave behind) must cause an error.
+	cfg := customEngineEvalConfig("codex", &CustomEngineConfig{
+		Transport: "bogus",
+		Local:     &CustomLocalConfig{Command: "${DEFINITELY_MISSING_VAR}"},
+	})
 
-	if err := NewValidator().ValidateEvalConfig(cfg); err != nil {
-		t.Fatalf("ValidateEvalConfig: %v", err)
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("ResolveCustomEngineConfig: %v", err)
+	}
+}
+
+func TestResolveCustomEngineConfig_ResolvesModelEnv(t *testing.T) {
+	t.Setenv("CUSTOM_MODEL_NAME", "gpt-4.2")
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local:     &CustomLocalConfig{Command: "/opt/agent"},
+	})
+	cfg.Engine.Model = ModelConfig{
+		Provider: "${CUSTOM_MODEL_PROVIDER:-openai}",
+		Name:     "${CUSTOM_MODEL_NAME}",
+	}
+
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("ResolveCustomEngineConfig: %v", err)
+	}
+	if cfg.Engine.Model.Name != "gpt-4.2" {
+		t.Errorf("model.name = %q, want gpt-4.2", cfg.Engine.Model.Name)
+	}
+	if cfg.Engine.Model.Provider != "openai" {
+		t.Errorf("model.provider = %q, want openai", cfg.Engine.Model.Provider)
+	}
+}
+
+func TestLoadEvalConfig_DefersCustomEngineEnv(t *testing.T) {
+	// The loader must not abort on an unresolvable custom env reference;
+	// resolution is deferred until the final engine name is known.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eval.yaml")
+	const evalYAML = `schema_version: v1alpha1
+environment:
+  type: none
+engine:
+  name: my-agent
+  custom:
+    transport: local
+    local:
+      command: ${DEFINITELY_MISSING_VAR}
+cases:
+  files:
+    - cases/a.yaml
+`
+	if err := os.WriteFile(path, []byte(evalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLoader(path).LoadEvalConfig(); err != nil {
+		t.Fatalf("LoadEvalConfig must not fail on a deferred custom env ref: %v", err)
 	}
 }

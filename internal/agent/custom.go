@@ -236,18 +236,19 @@ func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOpti
 	}
 
 	a.registerFrameworkIO(res, inputFile, outputFile, outputFileProduced)
-	if parseErr != nil {
-		return res, parseErr
-	}
 	// A non-zero process exit is a failed run even when the engine's JSON
-	// reports exit_code 0 (e.g. a wrapper that crashed after printing output).
-	// Reflect the real process exit/stderr so reports are not misleading.
+	// reports exit_code 0 (e.g. a wrapper that crashed after printing output)
+	// or never emitted parseable JSON at all. Reflect the real process
+	// exit/stderr so reports surface the actual command failure.
 	if result.ExitCode != 0 {
 		res.ExitCode = result.ExitCode
 		if res.Stderr == "" {
 			res.Stderr = result.Stderr
 		}
 		return res, fmt.Errorf("custom engine command exited %d: %s", result.ExitCode, result.Stderr)
+	}
+	if parseErr != nil {
+		return res, parseErr
 	}
 	if res.ExitCode != 0 {
 		return res, fmt.Errorf("custom engine run failed (exit %d): %s", res.ExitCode, res.Stderr)
