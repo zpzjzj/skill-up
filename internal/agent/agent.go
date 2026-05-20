@@ -111,8 +111,12 @@ const ExitCodeSignalKilled = -1
 const (
 	agentProviderOpenAI    = "openai"
 	agentProviderAnthropic = "anthropic"
-	agentExecutablePath    = "$HOME/.local/bin:$HOME/.nvm/current/bin:$PATH"
 )
+
+// agentExecutablePath is defined per host OS in path_{windows,other}.go: a
+// POSIX PATH override pointing at the nvm/Node bootstrap install locations on
+// POSIX hosts, and an empty string on Windows so the host's native PATH (and
+// case-insensitive `Path`) reach `where` lookups untouched.
 
 // NewBaseAgent creates a new BaseAgent with the given config.
 // It preserves the resolved config passed from the caller.
@@ -255,7 +259,10 @@ func downloadSessionArtifact(ctx context.Context, rt Runtime, artifactDir, sessi
 }
 
 func (a *BaseAgent) mergeExecOptionsEnv(ctx context.Context, opts ExecOptions, envVars map[string]string, attrs map[string]string) ExecOptions {
-	merged := map[string]string{"PATH": agentExecutablePath}
+	merged := map[string]string{}
+	if agentExecutablePath != "" {
+		merged["PATH"] = agentExecutablePath
+	}
 	maps.Copy(merged, envVars)
 	maps.Copy(merged, opts.Env)
 	maps.Copy(merged, observability.AgentEnv(ctx, merged, attrs))
