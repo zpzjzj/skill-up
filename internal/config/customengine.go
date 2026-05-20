@@ -40,13 +40,24 @@ func isSensitiveTemplateVar(name string) bool {
 }
 
 // normalizeKeyForSensitiveCheck converts a kwarg key into UPPER_SNAKE_CASE so
-// the sensitive-name pattern recognizes hyphenated and camelCase names too.
+// the sensitive-name pattern recognizes alternative naming conventions —
+// hyphenated ("api-key"), dotted ("api.key"), camelCase ("apiKey",
+// "bearerToken"), and other non-alphanumeric separators.
 func normalizeKeyForSensitiveCheck(key string) string {
-	key = strings.ReplaceAll(key, "-", "_")
-	var b strings.Builder
-	b.Grow(len(key) + 4)
-	prevLower := false
+	var sep strings.Builder
+	sep.Grow(len(key))
 	for _, r := range key {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			sep.WriteRune(r)
+		} else {
+			sep.WriteByte('_')
+		}
+	}
+	normalized := sep.String()
+	var b strings.Builder
+	b.Grow(len(normalized) + 4)
+	prevLower := false
+	for _, r := range normalized {
 		if prevLower && unicode.IsUpper(r) {
 			b.WriteByte('_')
 		}
@@ -124,11 +135,18 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	// kwargs values can be expanded into a command line via ${kwargs.<key>},
 	// and per the design kwargs are not for sensitive values; resolve strictly.
 	errs = append(errs, resolveStringMapEnv("kwargs", custom.Kwargs, true)...)
-	if custom.Local != nil {
-		errs = append(errs, resolveLocalEnv(custom.Local)...)
-	}
-	if custom.HTTP != nil {
-		errs = append(errs, resolveHTTPEnv(custom.HTTP)...)
+	// Only the active transport block is resolved, so stale ${VAR} refs in an
+	// inactive block (e.g. a leftover custom.http while transport: local) do
+	// not fail an otherwise runnable config.
+	switch custom.Transport {
+	case customTransportLocal:
+		if custom.Local != nil {
+			errs = append(errs, resolveLocalEnv(custom.Local)...)
+		}
+	case customTransportHTTP:
+		if custom.HTTP != nil {
+			errs = append(errs, resolveHTTPEnv(custom.HTTP)...)
+		}
 	}
 	errs = append(errs, resolveModelEnv(&cfg.Engine.Model)...)
 

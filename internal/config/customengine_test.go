@@ -309,7 +309,12 @@ func TestResolveCustomEngineConfig_RejectsSecretLikeKwargKeyVariants(t *testing.
 }
 
 func TestIsSensitiveTemplateVar_KwargsKeyVariants(t *testing.T) {
-	for _, name := range []string{"kwargs.api-key", "kwargs.apiKey", "kwargs.bearerToken", "kwargs.api_key", "kwargs.MY_PASSWORD"} {
+	for _, name := range []string{
+		"kwargs.api-key", "kwargs.apiKey", "kwargs.bearerToken",
+		"kwargs.api_key", "kwargs.MY_PASSWORD",
+		// Dotted and other non-alphanumeric separators also count.
+		"kwargs.api.key", "kwargs.bearer token", "kwargs.access/key",
+	} {
 		if !isSensitiveTemplateVar(name) {
 			t.Errorf("isSensitiveTemplateVar(%q) = false, want true", name)
 		}
@@ -318,6 +323,20 @@ func TestIsSensitiveTemplateVar_KwargsKeyVariants(t *testing.T) {
 		if isSensitiveTemplateVar(name) {
 			t.Errorf("isSensitiveTemplateVar(%q) = true, want false", name)
 		}
+	}
+}
+
+func TestResolveCustomEngineConfig_SkipsInactiveTransportBlock(t *testing.T) {
+	// transport: local — a stale ${MISSING_VAR} in an unused custom.http
+	// block must not block an otherwise runnable local config.
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local:     &CustomLocalConfig{Command: "/opt/agent"},
+		HTTP:      &CustomHTTPConfig{URL: "${DEFINITELY_MISSING_VAR}"},
+	})
+
+	if err := ResolveCustomEngineConfig(cfg); err != nil {
+		t.Fatalf("inactive http block must not fail local-transport resolution: %v", err)
 	}
 }
 
