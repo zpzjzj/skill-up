@@ -100,8 +100,10 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	var errs []string
 	errs = append(errs, resolveScalarEnv("transport", &custom.Transport, false)...)
 	errs = append(errs, resolveScalarEnv("response_format", &custom.ResponseFormat, false)...)
-	errs = append(errs, resolveStringMapEnv("env", custom.Env)...)
-	errs = append(errs, resolveStringMapEnv("kwargs", custom.Kwargs)...)
+	errs = append(errs, resolveStringMapEnv("env", custom.Env, false)...)
+	// kwargs values can be expanded into a command line via ${kwargs.<key>},
+	// and per the design kwargs are not for sensitive values; resolve strictly.
+	errs = append(errs, resolveStringMapEnv("kwargs", custom.Kwargs, true)...)
 	if custom.Local != nil {
 		errs = append(errs, resolveLocalEnv(custom.Local)...)
 	}
@@ -128,11 +130,18 @@ func resolveScalarEnv(field string, target *string, strict bool) []string {
 	return nil
 }
 
-// resolveStringMapEnv resolves every value of a string map in place.
-func resolveStringMapEnv(field string, m map[string]string) []string {
+// resolveStringMapEnv resolves every value of a string map in place. When
+// strict, it additionally rejects secret-like references in the values (used
+// for kwargs, whose entries can be expanded into command lines via
+// ${kwargs.<key>}; per the design, kwargs are not for sensitive values).
+func resolveStringMapEnv(field string, m map[string]string, strict bool) []string {
+	resolveFn := resolveEnvRefs
+	if strict {
+		resolveFn = resolveEnvRefsStrict
+	}
 	var errs []string
 	for k, v := range m {
-		rv, err := resolveEnvRefs(v)
+		rv, err := resolveFn(v)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("engine.custom.%s.%s: %s", field, k, err))
 			continue
@@ -167,7 +176,7 @@ func resolveHTTPEnv(h *CustomHTTPConfig) []string {
 	var errs []string
 	errs = append(errs, resolveScalarEnv("http.url", &h.URL, false)...)
 	errs = append(errs, resolveScalarEnv("http.method", &h.Method, false)...)
-	errs = append(errs, resolveStringMapEnv("http.headers", h.Headers)...)
+	errs = append(errs, resolveStringMapEnv("http.headers", h.Headers, false)...)
 	for i := range h.Files {
 		rv, err := resolveEnvRefs(h.Files[i].Path)
 		if err != nil {

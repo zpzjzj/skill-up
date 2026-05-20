@@ -402,11 +402,25 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, rt Runtime, opts E
 	}
 	a.collectArtifacts(ctx, rt, opts, artifacts)
 
+	finalMsg := parsed.FinalMessage
 	trans := parsed.Transcript
+	if finalMsg == "" && len(trans) > 0 {
+		// The engine provided a transcript but omitted final_message; derive
+		// it from the last assistant reply so judges and reports do not grade
+		// or display a blank answer.
+		finalMsg = trans.FinalAssistantMessage()
+	}
 	if len(trans) == 0 {
 		// Build the documented minimal transcript so judges still receive the
 		// conversation when the engine omits an explicit transcript.
-		trans = minimalCustomTranscript(messages, parsed.FinalMessage)
+		trans = minimalCustomTranscript(messages, finalMsg)
+	}
+
+	turns := parsed.Turns
+	if turns == 0 {
+		// Default missing turns from the transcript so an otherwise
+		// successful custom run does not report 0 turns to judges/reports.
+		turns = maxTranscriptTurn(trans)
 	}
 
 	res := &SessionResult{
@@ -414,10 +428,10 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, rt Runtime, opts E
 		Model:        firstNonEmpty(parsed.Model, formatAgentModel(a.Cfg.ModelProvider, a.Cfg.ModelName)),
 		ExitCode:     *parsed.ExitCode,
 		DurationMs:   parsed.DurationMs,
-		Turns:        parsed.Turns,
+		Turns:        turns,
 		InputTokens:  parsed.InputTokens,
 		OutputTokens: parsed.OutputTokens,
-		FinalMessage: parsed.FinalMessage,
+		FinalMessage: finalMsg,
 		Stderr:       parsed.Stderr,
 		Transcript:   trans,
 		Artifacts:    artifacts,
@@ -426,6 +440,18 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, rt Runtime, opts E
 		res.DurationMs = durationMs
 	}
 	return res, nil
+}
+
+// maxTranscriptTurn returns the highest Turn value in the transcript, or 0
+// when the transcript is empty or no message carries a Turn.
+func maxTranscriptTurn(trans transcript.Transcript) int {
+	maxTurn := 0
+	for _, m := range trans {
+		if m.Turn > maxTurn {
+			maxTurn = m.Turn
+		}
+	}
+	return maxTurn
 }
 
 // minimalCustomTranscript builds a fallback transcript from the input messages

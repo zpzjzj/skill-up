@@ -236,6 +236,26 @@ func TestResolveCustomEngineConfig_RejectsSecretInOutputFile(t *testing.T) {
 	}
 }
 
+func TestResolveCustomEngineConfig_RejectsSecretSourcedKwarg(t *testing.T) {
+	t.Setenv("CUSTOM_AGENT_TOKEN", "tok")
+	// kwargs values are resolved strictly: a secret-named env ref in a kwarg
+	// value is rejected, since ${kwargs.<key>} would later leak that value
+	// into a logged command line.
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Kwargs:    map[string]string{"profile": "${CUSTOM_AGENT_TOKEN}"},
+		Local: &CustomLocalConfig{
+			Command: "/opt/agent",
+			Args:    []string{"--profile", "${kwargs.profile}"},
+		},
+	})
+
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want a secret-sourced kwarg value rejected", err)
+	}
+}
+
 func TestResolveCustomEngineConfig_AllowsNonSecretKwargInCommand(t *testing.T) {
 	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
 		Transport: "local",

@@ -606,6 +606,51 @@ func containsBasename(paths []string, base string) bool {
 	return false
 }
 
+func TestCustomAgent_RunLocal_DefaultsTurnsFromTranscript(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// Engine returns the documented minimal SessionResult (no turns); the
+	// agent must default Turns from the produced transcript.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"ok"}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Turns < 1 {
+		t.Fatalf("res.Turns = %d, want it defaulted from the transcript (>=1)", res.Turns)
+	}
+}
+
+func TestCustomAgent_RunLocal_DerivesFinalMessageFromTranscript(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// Engine omits final_message but provides a transcript; the agent must
+	// derive final_message from the last assistant reply so judges and
+	// reports do not grade or display a blank answer.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"transcript":[{"role":"user","content":"q"},{"role":"assistant","content":"derived-answer"}]}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "derived-answer" {
+		t.Fatalf("final_message = %q, want it derived from the transcript", res.FinalMessage)
+	}
+}
+
 func TestCustomAgent_RunHTTP_NotImplemented(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
