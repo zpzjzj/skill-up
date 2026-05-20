@@ -420,7 +420,7 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, rt Runtime, opts E
 	if turns == 0 {
 		// Default missing turns from the transcript so an otherwise
 		// successful custom run does not report 0 turns to judges/reports.
-		turns = maxTranscriptTurn(trans)
+		turns = deriveTurns(trans)
 	}
 
 	res := &SessionResult{
@@ -442,16 +442,24 @@ func (a *CustomAgent) parseSessionResult(ctx context.Context, rt Runtime, opts E
 	return res, nil
 }
 
-// maxTranscriptTurn returns the highest Turn value in the transcript, or 0
-// when the transcript is empty or no message carries a Turn.
-func maxTranscriptTurn(trans transcript.Transcript) int {
-	maxTurn := 0
+// deriveTurns infers a turn count from a transcript. It prefers the highest
+// explicit Message.Turn value; when no message carries Turn (the
+// design-example transcript only sets role/content) it falls back to the
+// assistant-reply count so a successful run does not report turns=0.
+func deriveTurns(trans transcript.Transcript) int {
+	maxTurn, assistantCount := 0, 0
 	for _, m := range trans {
 		if m.Turn > maxTurn {
 			maxTurn = m.Turn
 		}
+		if m.Role == transcript.RoleAssistant {
+			assistantCount++
+		}
 	}
-	return maxTurn
+	if maxTurn > 0 {
+		return maxTurn
+	}
+	return assistantCount
 }
 
 // minimalCustomTranscript builds a fallback transcript from the input messages

@@ -628,6 +628,29 @@ func TestCustomAgent_RunLocal_DefaultsTurnsFromTranscript(t *testing.T) {
 	}
 }
 
+func TestCustomAgent_RunLocal_DerivesTurnsFromTranscriptWithoutTurnField(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// Engine supplies a transcript whose messages omit the `turn` field
+	// (matches the design's transcript example). Turns must still be > 0.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"answer","transcript":[{"role":"user","content":"q1"},{"role":"assistant","content":"a1"},{"role":"user","content":"q2"},{"role":"assistant","content":"answer"}]}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Two assistant replies → 2 turns inferred from conversation structure.
+	if res.Turns != 2 {
+		t.Fatalf("res.Turns = %d, want 2 (one per assistant reply)", res.Turns)
+	}
+}
+
 func TestCustomAgent_RunLocal_DerivesFinalMessageFromTranscript(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
