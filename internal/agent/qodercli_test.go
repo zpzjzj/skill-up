@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -293,6 +294,13 @@ func TestFindQoderSessionFile(t *testing.T) {
 }
 
 func TestFindQoderSessionFile_SelectsNewestByModTime(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		// The workspace-key path layout embeds a Linux-style workspace path,
+		// which contains a colon on Windows (e.g. `C:`) and cannot be a
+		// directory component. Qoder native Windows agent execution is out of
+		// scope; this test is exercised on Linux/darwin only.
+		t.Skip("qoder workspace-key path layout is POSIX-only")
+	}
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -211,7 +212,13 @@ func TestNoneRuntime_ExecReturnsContextErrorOnTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	result, err := rt.Exec(ctx, "sleep 1", ExecOptions{})
+	// `sleep 1` is POSIX; on Windows cmd.exe falls back to a long ping
+	// so the process actually outlives the deadline and gets killed.
+	sleepCmd := "sleep 1"
+	if goruntime.GOOS == "windows" {
+		sleepCmd = "ping -n 3 127.0.0.1 > nul"
+	}
+	result, err := rt.Exec(ctx, sleepCmd, ExecOptions{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected context deadline exceeded, got %v", err)
 	}
@@ -325,6 +332,11 @@ func TestNoneRuntime_ExecWithEnv(t *testing.T) {
 }
 
 func TestNoneRuntime_ExecExpandsPathFromRuntimeEnv(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		// The test asserts POSIX `printf "$PATH"` expansion; on Windows the
+		// host shell is cmd.exe, which neither has printf nor uses `$PATH`.
+		t.Skip("POSIX PATH expansion test; Windows has no equivalent")
+	}
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatal(err)

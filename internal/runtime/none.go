@@ -222,24 +222,27 @@ func (r *NoneRuntime) Exec(ctx context.Context, command string, opts ExecOptions
 // classifyExecError translates a *exec.Cmd Run error into the (exitCode, error)
 // pair that callers expose through ExecResult.
 //
-// Precedence (matches the legacy inline behaviour):
+// Precedence:
 //
 //	nil err                            → (0, nil)
-//	*exec.ExitError + ctx.Err() == nil → (exitCode, nil)
-//	*exec.ExitError + ctx.Err() != nil → (exitCode, ctxErr)   // process was killed by ctx
-//	non-ExitError                      → (-1, ctxErr or err)
+//	ctx.Err() != nil (any cause)       → (-1, ctxErr)   // process was killed by ctx
+//	*exec.ExitError                    → (exitCode, nil)
+//	non-ExitError                      → (-1, runErr)
+//
+// When the context terminated the process we always report -1 instead of the
+// OS-reported exit code: on Windows a killed cmd.exe surfaces 1, which would
+// otherwise be indistinguishable from a normal failure.
 func classifyExecError(ctx context.Context, runErr error) (int, error) {
 	if runErr == nil {
 		return 0, nil
 	}
-	ctxErr := ctx.Err()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return -1, ctxErr
+	}
 
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return exitErr.ExitCode(), ctxErr
-	}
-	if ctxErr != nil {
-		return -1, ctxErr
+		return exitErr.ExitCode(), nil
 	}
 	return -1, runErr
 }
