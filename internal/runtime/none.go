@@ -171,6 +171,12 @@ func (r *NoneRuntime) Exec(ctx context.Context, command string, opts ExecOptions
 	startTime := time.Now()
 
 	cmd := platform.NewShellCmd(ctx, command)
+	// Bound the grace window between ctx-cancel and Wait returning: under
+	// MSYS bash on Windows the grandchild (ping/sleep/git) inherits bash's
+	// stderr pipe write end, so even after bash itself is killed by
+	// CommandContext the pipe read goroutine would block forever. WaitDelay
+	// force-closes the descriptors after the delay so Wait can return.
+	cmd.WaitDelay = 10 * time.Second
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	} else {
