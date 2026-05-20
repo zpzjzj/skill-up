@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // sensitiveEnvNamePattern matches environment variable names that look like
@@ -31,9 +32,28 @@ func isSensitiveTemplateVar(name string) bool {
 		return true
 	}
 	if key, ok := strings.CutPrefix(name, "kwargs."); ok {
-		return isSensitiveEnvName(key)
+		// kwarg keys may use hyphens or camelCase (e.g. "api-key", "apiKey",
+		// "bearerToken"); normalize before the underscore-bounded check.
+		return isSensitiveEnvName(normalizeKeyForSensitiveCheck(key))
 	}
 	return false
+}
+
+// normalizeKeyForSensitiveCheck converts a kwarg key into UPPER_SNAKE_CASE so
+// the sensitive-name pattern recognizes hyphenated and camelCase names too.
+func normalizeKeyForSensitiveCheck(key string) string {
+	key = strings.ReplaceAll(key, "-", "_")
+	var b strings.Builder
+	b.Grow(len(key) + 4)
+	prevLower := false
+	for _, r := range key {
+		if prevLower && unicode.IsUpper(r) {
+			b.WriteByte('_')
+		}
+		b.WriteRune(r)
+		prevLower = unicode.IsLower(r)
+	}
+	return strings.ToUpper(b.String())
 }
 
 // builtinTemplateVars is the set of run-time template variable names provided
@@ -268,8 +288,25 @@ func resolveEnvRefs(s string) (string, error) {
 // secret-like environment variables. It is used for fields that become a
 // command line (local.command / local.args), keeping credentials out of
 // process listings and exec traces.
+//
+// The resolver iterates: if the produced value itself embeds further ${...}
+// references (a wrapper env var whose value is "${CUSTOM_AGENT_TOKEN}"), the
+// next pass re-checks them, so a non-sensitive wrapper cannot smuggle a
+// sensitive name through to run-time rendering. Iteration stops at a fixed
+// point or at maxStrictExpansionDepth to bound pathological cycles.
 func resolveEnvRefsStrict(s string) (string, error) {
-	return resolveEnvRefsWith(s, true)
+	const maxStrictExpansionDepth = 10
+	for range maxStrictExpansionDepth {
+		resolved, err := resolveEnvRefsWith(s, true)
+		if err != nil {
+			return "", err
+		}
+		if resolved == s || !strings.Contains(resolved, "${") {
+			return resolved, nil
+		}
+		s = resolved
+	}
+	return "", errors.New("strict env resolution exceeded maximum depth (possible reference cycle)")
 }
 
 func resolveEnvRefsWith(s string, rejectSecrets bool) (string, error) {

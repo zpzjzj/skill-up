@@ -271,6 +271,56 @@ func TestResolveCustomEngineConfig_AllowsNonSecretKwargInCommand(t *testing.T) {
 	}
 }
 
+func TestResolveCustomEngineConfig_RejectsWrappedSecretInCommand(t *testing.T) {
+	t.Setenv("CUSTOM_AGENT_TOKEN", "tok")
+	t.Setenv("WRAPPER", "${CUSTOM_AGENT_TOKEN}")
+	// ${WRAPPER} resolves to a literal "${CUSTOM_AGENT_TOKEN}" string, which
+	// would be re-expanded at run time. The strict resolver must reject this.
+	cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+		Transport: "local",
+		Local: &CustomLocalConfig{
+			Command: "/opt/agent",
+			Args:    []string{"--token", "${WRAPPER}"},
+		},
+	})
+
+	err := ResolveCustomEngineConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "custom.env") {
+		t.Fatalf("error = %v, want a wrapped secret reference rejected", err)
+	}
+}
+
+func TestResolveCustomEngineConfig_RejectsSecretLikeKwargKeyVariants(t *testing.T) {
+	for _, key := range []string{"api-key", "apiKey", "bearerToken", "Authorization"} {
+		cfg := customEngineEvalConfig("my-agent", &CustomEngineConfig{
+			Transport: "local",
+			Kwargs:    map[string]string{key: "literal"},
+			Local: &CustomLocalConfig{
+				Command: "/opt/agent",
+				Args:    []string{"--cred", "${kwargs." + key + "}"},
+			},
+		})
+
+		err := ResolveCustomEngineConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "custom.env") {
+			t.Errorf("kwargs key %q: error = %v, want it rejected", key, err)
+		}
+	}
+}
+
+func TestIsSensitiveTemplateVar_KwargsKeyVariants(t *testing.T) {
+	for _, name := range []string{"kwargs.api-key", "kwargs.apiKey", "kwargs.bearerToken", "kwargs.api_key", "kwargs.MY_PASSWORD"} {
+		if !isSensitiveTemplateVar(name) {
+			t.Errorf("isSensitiveTemplateVar(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"kwargs.profile", "kwargs.maxFiles", "kwargs.report_format"} {
+		if isSensitiveTemplateVar(name) {
+			t.Errorf("isSensitiveTemplateVar(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestIsSensitiveEnvName(t *testing.T) {
 	for _, name := range []string{"CUSTOM_AGENT_TOKEN", "OPENAI_API_KEY", "MY_SECRET", "DB_PASSWORD", "GH_ACCESS_KEY"} {
 		if !isSensitiveEnvName(name) {
