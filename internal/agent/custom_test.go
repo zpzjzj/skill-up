@@ -117,6 +117,7 @@ func TestCustomAgent_InstallMCP_NoopWithServers(t *testing.T) {
 	}
 }
 
+//nolint:dupl // distinct scenario from InputFileEqualsOutputFile (relative cwd vs path collision)
 func TestCustomAgent_RunLocal_RelativeOutputFileWithCwd(t *testing.T) {
 	t.Parallel()
 	rt := newCustomTestRuntime(t)
@@ -671,6 +672,58 @@ func TestCustomAgent_RunLocal_DerivesFinalMessageFromTranscript(t *testing.T) {
 	}
 	if res.FinalMessage != "derived-answer" {
 		t.Fatalf("final_message = %q, want it derived from the transcript", res.FinalMessage)
+	}
+}
+
+func TestCustomAgent_RunLocal_PreservesResultOnWaitDelay(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// The parent prints a valid SessionResult and exits, but a backgrounded
+	// child keeps stdout open past NoneRuntime's WaitDelay. rt.Exec returns
+	// a non-nil exec.ErrWaitDelay; the agent must still read the JSON the
+	// parent already emitted and surface the partial result.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command: "sh",
+			Args:    []string{"-c", `echo '{"exit_code":0,"final_message":"recovered"}'; (sleep 30 &); exit 0`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err == nil {
+		t.Fatal("expected a WaitDelay-related error from rt.Exec")
+	}
+	if res == nil || res.FinalMessage != "recovered" {
+		t.Fatalf("res = %#v, want the partial result preserved despite WaitDelay", res)
+	}
+}
+
+//nolint:dupl // distinct scenario: input/output path collision, asserted via a different command shape than RelativeOutputFileWithCwd
+func TestCustomAgent_RunLocal_InputFileEqualsOutputFile(t *testing.T) {
+	t.Parallel()
+	rt := newCustomTestRuntime(t)
+	// Both paths resolve to the same file. The framework must not delete the
+	// SessionInput it just wrote, so the command can still read it before
+	// overwriting it with its own SessionResult.
+	ag := customLocalAgent(&config.CustomEngineConfig{
+		Transport: "local",
+		Local: &config.CustomLocalConfig{
+			Command:    "sh",
+			InputFile:  "io.json",
+			OutputFile: "io.json",
+			Args: []string{"-c", `set -e
+test -s '${input_file}' || { echo "input was deleted" >&2; exit 1; }
+echo '{"exit_code":0,"final_message":"same-path-ok"}' > '${output_file}'`},
+		},
+	})
+
+	res, err := ag.Run(context.Background(), rt, ExecOptions{}, userMessages())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != "same-path-ok" {
+		t.Fatalf("final_message = %q, want same-path-ok (input must survive when paths collide)", res.FinalMessage)
 	}
 }
 

@@ -135,8 +135,10 @@ func (a *CustomAgent) runLocal(ctx context.Context, rt Runtime, opts ExecOptions
 	// run is never mistaken for this invocation's output. Only an explicitly
 	// configured output_file is cleared — the default ${output_file} path is
 	// left untouched, as it may be ordinary fixture input the agent reads.
+	// Also skip the clear when output_file resolves to the same path as
+	// input_file, so the SessionInput just written is not self-deleted.
 	clearedStaleOutput := false
-	if custom.Local.OutputFile != "" {
+	if custom.Local.OutputFile != "" && filepath.Clean(outputFile) != filepath.Clean(inputFile) {
 		clearedStaleOutput = a.clearStaleOutputFile(ctx, rt, outputFile)
 	}
 
@@ -221,24 +223,26 @@ func (a *CustomAgent) buildLocalExec(ctx context.Context, rt Runtime, opts ExecO
 func (a *CustomAgent) finishLocal(ctx context.Context, rt Runtime, opts ExecOptions, custom *config.CustomEngineConfig, result ExecResult, execErr error, inputFile, outputFile string, clearedStaleOutput bool, start time.Time, messages []transcript.Message) (*SessionResult, error) {
 	durationMs := time.Since(start).Milliseconds()
 
-	// On a timeout/cancel the command may already have emitted a valid result;
-	// still read it so judges and expect checks can inspect the partial answer.
+	// The command may already have emitted a valid result even when execErr
+	// is non-nil — a timeout, exec.ErrWaitDelay (a backgrounded child kept
+	// stdout open past WaitDelay), or a non-zero exit after printing output.
+	// Always attempt the read so judges and expect checks can inspect the
+	// partial answer; if nothing was produced, raw stays empty and the
+	// parse-error path below takes over.
 	var (
 		raw                string
 		outputFileProduced bool
 	)
-	if execErr == nil || isTimeoutError(execErr) {
-		// After a timeout/cancel, ctx is already done; read artifacts on a
-		// fresh context so a partial output file is still recoverable
-		// (notably for remote runtimes whose DownloadFile honors ctx).
-		readCtx := ctx
-		if execErr != nil {
-			var cancel context.CancelFunc
-			readCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), customArtifactReadTimeout)
-			defer cancel()
-		}
-		raw, outputFileProduced = a.readRawResult(readCtx, rt, custom, result, outputFile)
+	readCtx := ctx
+	if execErr != nil {
+		// ctx may have been canceled (timeout/cancel) or unrelated to the
+		// failure; use a fresh context so a partial result is still
+		// recoverable on remote runtimes whose DownloadFile honors ctx.
+		var cancel context.CancelFunc
+		readCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), customArtifactReadTimeout)
+		defer cancel()
 	}
+	raw, outputFileProduced = a.readRawResult(readCtx, rt, custom, result, outputFile)
 
 	res, parseErr := a.buildResult(ctx, rt, opts, custom, raw, result, durationMs, messages)
 
@@ -305,12 +309,6 @@ func (a *CustomAgent) buildResult(ctx context.Context, rt Runtime, opts ExecOpti
 		}, nil
 	}
 	return a.parseSessionResult(ctx, rt, opts, raw, durationMs, messages)
-}
-
-// isTimeoutError reports whether err is a context deadline/cancellation, which
-// means the command was interrupted rather than failing to start.
-func isTimeoutError(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // registerFrameworkIO records the framework-written input/output files in
