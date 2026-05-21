@@ -316,6 +316,10 @@ func isTimeoutError(err error) bool {
 // registerFrameworkIO records the framework-written input/output files in
 // GeneratedFiles so the workspace-diff collector excludes them (they would
 // otherwise show up as user changes) and they are archived for debugging.
+// The bool gates registration of outputFile to match the "produced or cleared"
+// rule the caller computes.
+//
+//revive:disable-next-line:flag-parameter
 func (a *CustomAgent) registerFrameworkIO(res *SessionResult, inputFile, outputFile string, usedOutputFile bool) {
 	if res.Artifacts == nil {
 		res.Artifacts = &SessionArtifacts{}

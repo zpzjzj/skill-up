@@ -129,12 +129,12 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	}
 
 	var errs []string
-	errs = append(errs, resolveScalarEnv("transport", &custom.Transport, false)...)
-	errs = append(errs, resolveScalarEnv("response_format", &custom.ResponseFormat, false)...)
-	errs = append(errs, resolveStringMapEnv("env", custom.Env, false)...)
+	errs = append(errs, resolveScalarEnv("transport", &custom.Transport)...)
+	errs = append(errs, resolveScalarEnv("response_format", &custom.ResponseFormat)...)
+	errs = append(errs, resolveStringMapEnv("env", custom.Env)...)
 	// kwargs values can be expanded into a command line via ${kwargs.<key>},
 	// and per the design kwargs are not for sensitive values; resolve strictly.
-	errs = append(errs, resolveStringMapEnv("kwargs", custom.Kwargs, true)...)
+	errs = append(errs, resolveStringMapEnvStrict("kwargs", custom.Kwargs)...)
 	// Only the active transport block is resolved, so stale ${VAR} refs in an
 	// inactive block (e.g. a leftover custom.http while transport: local) do
 	// not fail an otherwise runnable config.
@@ -153,13 +153,19 @@ func resolveCustomEngineEnv(cfg *EvalConfig) error {
 	return aggregateConfigErrors(errs)
 }
 
-// resolveScalarEnv resolves a single string field. When strict, it additionally
-// rejects secret-like references (for fields that become a command line).
-func resolveScalarEnv(field string, target *string, strict bool) []string {
-	resolveFn := resolveEnvRefs
-	if strict {
-		resolveFn = resolveEnvRefsStrict
-	}
+// resolveScalarEnv resolves a single string field, leaving secret-like
+// references untouched (env / non-command-line use).
+func resolveScalarEnv(field string, target *string) []string {
+	return resolveScalarEnvWith(field, target, resolveEnvRefs)
+}
+
+// resolveScalarEnvStrict resolves a single string field, rejecting secret-like
+// references (used for fields that become a command line, e.g. local.command).
+func resolveScalarEnvStrict(field string, target *string) []string {
+	return resolveScalarEnvWith(field, target, resolveEnvRefsStrict)
+}
+
+func resolveScalarEnvWith(field string, target *string, resolveFn func(string) (string, error)) []string {
 	v, err := resolveFn(*target)
 	if err != nil {
 		return []string{fmt.Sprintf("engine.custom.%s: %s", field, err)}
@@ -168,15 +174,22 @@ func resolveScalarEnv(field string, target *string, strict bool) []string {
 	return nil
 }
 
-// resolveStringMapEnv resolves every value of a string map in place. When
-// strict, it additionally rejects secret-like references in the values (used
-// for kwargs, whose entries can be expanded into command lines via
-// ${kwargs.<key>}; per the design, kwargs are not for sensitive values).
-func resolveStringMapEnv(field string, m map[string]string, strict bool) []string {
-	resolveFn := resolveEnvRefs
-	if strict {
-		resolveFn = resolveEnvRefsStrict
-	}
+// resolveStringMapEnv resolves every value of a string map in place, leaving
+// secret-like references untouched (used for env and http.headers, which
+// legitimately hold credentials).
+func resolveStringMapEnv(field string, m map[string]string) []string {
+	return resolveStringMapEnvWith(field, m, resolveEnvRefs)
+}
+
+// resolveStringMapEnvStrict resolves a string map's values strictly, rejecting
+// secret-like references (used for kwargs, whose entries can be expanded into
+// command lines via ${kwargs.<key>}; per the design, kwargs are not for
+// sensitive values).
+func resolveStringMapEnvStrict(field string, m map[string]string) []string {
+	return resolveStringMapEnvWith(field, m, resolveEnvRefsStrict)
+}
+
+func resolveStringMapEnvWith(field string, m map[string]string, resolveFn func(string) (string, error)) []string {
 	var errs []string
 	for k, v := range m {
 		rv, err := resolveFn(v)
@@ -194,10 +207,10 @@ func resolveStringMapEnv(field string, m map[string]string, strict bool) []strin
 // they reject secret-like references.
 func resolveLocalEnv(l *CustomLocalConfig) []string {
 	var errs []string
-	errs = append(errs, resolveScalarEnv("local.command", &l.Command, true)...)
-	errs = append(errs, resolveScalarEnv("local.cwd", &l.Cwd, true)...)
-	errs = append(errs, resolveScalarEnv("local.input_file", &l.InputFile, true)...)
-	errs = append(errs, resolveScalarEnv("local.output_file", &l.OutputFile, true)...)
+	errs = append(errs, resolveScalarEnvStrict("local.command", &l.Command)...)
+	errs = append(errs, resolveScalarEnvStrict("local.cwd", &l.Cwd)...)
+	errs = append(errs, resolveScalarEnvStrict("local.input_file", &l.InputFile)...)
+	errs = append(errs, resolveScalarEnvStrict("local.output_file", &l.OutputFile)...)
 	for i := range l.Args {
 		rv, err := resolveEnvRefsStrict(l.Args[i])
 		if err != nil {
@@ -212,9 +225,9 @@ func resolveLocalEnv(l *CustomLocalConfig) []string {
 // resolveHTTPEnv resolves the engine.custom.http fields.
 func resolveHTTPEnv(h *CustomHTTPConfig) []string {
 	var errs []string
-	errs = append(errs, resolveScalarEnv("http.url", &h.URL, false)...)
-	errs = append(errs, resolveScalarEnv("http.method", &h.Method, false)...)
-	errs = append(errs, resolveStringMapEnv("http.headers", h.Headers, false)...)
+	errs = append(errs, resolveScalarEnv("http.url", &h.URL)...)
+	errs = append(errs, resolveScalarEnv("http.method", &h.Method)...)
+	errs = append(errs, resolveStringMapEnv("http.headers", h.Headers)...)
 	for i := range h.Files {
 		rv, err := resolveEnvRefs(h.Files[i].Path)
 		if err != nil {
@@ -327,6 +340,11 @@ func resolveEnvRefsStrict(s string) (string, error) {
 	return "", errors.New("strict env resolution exceeded maximum depth (possible reference cycle)")
 }
 
+// resolveEnvRefsWith is the strictness-parameterized impl behind
+// resolveEnvRefs and resolveEnvRefsStrict; the bool is the strict-mode toggle
+// kept here as a private implementation detail.
+//
+//revive:disable-next-line:flag-parameter
 func resolveEnvRefsWith(s string, rejectSecrets bool) (string, error) {
 	if s == "" || !strings.Contains(s, "${") {
 		return s, nil
@@ -362,6 +380,12 @@ func resolveEnvRefsWith(s string, rejectSecrets bool) (string, error) {
 	return b.String(), nil
 }
 
+// resolveEnvToken parses one ${VAR}-style placeholder and returns the
+// resolved value (or a flag asking the caller to keep the placeholder
+// literally). The bool is the same strict-mode toggle threaded from
+// resolveEnvRefsWith.
+//
+//revive:disable-next-line:flag-parameter
 func resolveEnvToken(inner string, rejectSecrets bool) (value string, leaveIntact bool, err error) {
 	name := inner
 	var defaultVal, errMsg string
